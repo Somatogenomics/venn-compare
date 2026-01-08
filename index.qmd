@@ -1,0 +1,565 @@
+---
+title: "VennCompare"
+subtitle: "Compare up to 7 lists with Venn diagrams & UpSet plots"
+format: 
+  html:
+    page-layout: full
+    toc: false
+filters:
+  - shinylive
+---
+
+```{shinylive-r}
+#| standalone: true
+#| viewerHeight: 800
+
+library(shiny)
+library(bslib)
+
+# Helper function to compute all intersections
+compute_intersections <- function(sets) {
+  if (length(sets) == 0) return(NULL)
+  
+  set_names <- names(sets)
+  n <- length(sets)
+  
+  results <- list()
+  
+  for (i in 1:(2^n - 1)) {
+    binary <- as.integer(intToBits(i))[1:n]
+    included <- which(binary == 1)
+    excluded <- which(binary == 0)
+    
+    if (length(included) == 1) {
+      intersection <- sets[[included]]
+    } else {
+      intersection <- Reduce(intersect, sets[included])
+    }
+    
+    if (length(excluded) > 0) {
+      for (ex in excluded) {
+        intersection <- setdiff(intersection, sets[[ex]])
+      }
+    }
+    
+    if (length(intersection) > 0) {
+      combo_name <- paste(set_names[included], collapse = " \u2229 ")
+      results[[combo_name]] <- list(
+        elements = intersection,
+        count = length(intersection),
+        sets_included = set_names[included],
+        n_sets = length(included)
+      )
+    }
+  }
+  
+  return(results)
+}
+
+# Function to draw Venn diagram using base R graphics
+draw_venn <- function(sets, colors) {
+  n <- length(sets)
+  if (n < 2 || n > 5) return(NULL)
+  
+  par(mar = c(1, 1, 2, 1))
+  plot(0, 0, type = "n", xlim = c(-4, 4), ylim = c(-4, 4), 
+       asp = 1, axes = FALSE, xlab = "", ylab = "",
+       main = paste("Comparison of", n, "Sets"))
+  
+  # Circle positions and radii based on number of sets
+  if (n == 2) {
+    centers <- list(c(-1, 0), c(1, 0))
+    radius <- 1.8
+  } else if (n == 3) {
+    centers <- list(c(-1, 0.5), c(1, 0.5), c(0, -1))
+    radius <- 1.6
+  } else if (n == 4) {
+    centers <- list(c(-1.2, 0.8), c(1.2, 0.8), c(-0.6, -0.8), c(0.6, -0.8))
+    radius <- 1.5
+  } else if (n == 5) {
+    angle_offset <- pi/2
+    centers <- lapply(1:5, function(i) {
+      angle <- angle_offset + (i-1) * 2 * pi / 5
+      c(1.5 * cos(angle), 1.5 * sin(angle))
+    })
+    radius <- 1.4
+  }
+  
+  # Draw circles
+  theta <- seq(0, 2*pi, length.out = 100)
+  for (i in 1:n) {
+    x <- centers[[i]][1] + radius * cos(theta)
+    y <- centers[[i]][2] + radius * sin(theta)
+    polygon(x, y, border = colors[i], col = adjustcolor(colors[i], alpha.f = 0.15), lwd = 2)
+  }
+  
+  # Add labels
+  set_names <- names(sets)
+  for (i in 1:n) {
+    # Position label outside circle
+    if (n == 2) {
+      label_pos <- list(c(-2.5, 1.5), c(2.5, 1.5))
+    } else if (n == 3) {
+      label_pos <- list(c(-2.5, 2), c(2.5, 2), c(0, -3))
+    } else if (n == 4) {
+      label_pos <- list(c(-2.8, 2), c(2.8, 2), c(-2.2, -2.2), c(2.2, -2.2))
+    } else {
+      angle <- (pi/2) + (i-1) * 2 * pi / 5
+      label_pos <- lapply(1:5, function(j) {
+        a <- (pi/2) + (j-1) * 2 * pi / 5
+        c(2.8 * cos(a), 2.8 * sin(a))
+      })
+    }
+    text(label_pos[[i]][1], label_pos[[i]][2], set_names[i], col = colors[i], font = 2, cex = 1.1)
+  }
+  
+  # Calculate and display counts in regions
+  ints <- compute_intersections(sets)
+  
+  # For simplicity, show main counts
+  # This is approximate positioning - proper Venn would need exact region calculation
+  if (n == 2) {
+    # A only, A&B, B only
+    a_only <- length(setdiff(sets[[1]], sets[[2]]))
+    b_only <- length(setdiff(sets[[2]], sets[[1]]))
+    both <- length(intersect(sets[[1]], sets[[2]]))
+    text(-1.8, 0, a_only, cex = 1.2)
+    text(0, 0, both, cex = 1.2, font = 2)
+    text(1.8, 0, b_only, cex = 1.2)
+  } else if (n == 3) {
+    # Show intersection of all 3 in center
+    all_three <- length(Reduce(intersect, sets))
+    text(0, 0, all_three, cex = 1.2, font = 2)
+  }
+}
+
+# Function to draw UpSet-style plot
+draw_upset <- function(sets, colors) {
+  ints <- compute_intersections(sets)
+  if (is.null(ints) || length(ints) == 0) return(NULL)
+  
+  # Sort by count
+  counts <- sapply(ints, function(x) x$count)
+  ints <- ints[order(-counts)]
+  
+  # Take top 20 intersections
+  if (length(ints) > 20) ints <- ints[1:20]
+  
+  n_ints <- length(ints)
+  n_sets <- length(sets)
+  set_names <- names(sets)
+  
+  # Layout
+  layout(matrix(c(1, 2), nrow = 1), widths = c(1, 3))
+  
+  # Left panel: Set sizes
+  par(mar = c(5, 8, 2, 0))
+  set_sizes <- sapply(sets, length)
+  barplot(rev(set_sizes), horiz = TRUE, col = rev(colors), 
+          names.arg = rev(set_names), las = 1, xlab = "Set Size",
+          border = NA)
+  
+  # Right panel: Intersection matrix and bars
+  par(mar = c(5, 1, 2, 2))
+  
+  # Create matrix plot area
+  plot(0, 0, type = "n", xlim = c(0, n_ints + 1), ylim = c(-n_sets - 1, max(counts) * 1.1),
+       axes = FALSE, xlab = "", ylab = "")
+  
+  # Draw bars
+  bar_width <- 0.6
+  for (i in 1:n_ints) {
+    rect(i - bar_width/2, 0, i + bar_width/2, ints[[i]]$count, 
+         col = "#4a4a4a", border = NA)
+    text(i, ints[[i]]$count + max(counts) * 0.03, ints[[i]]$count, cex = 0.8)
+  }
+  
+  # Draw matrix dots
+  for (i in 1:n_ints) {
+    included <- ints[[i]]$sets_included
+    for (j in 1:n_sets) {
+      y_pos <- -j
+      if (set_names[j] %in% included) {
+        points(i, y_pos, pch = 19, cex = 1.5, col = colors[j])
+      } else {
+        points(i, y_pos, pch = 19, cex = 1.5, col = "#e0e0e0")
+      }
+    }
+    # Connect dots for included sets
+    included_idx <- which(set_names %in% included)
+    if (length(included_idx) > 1) {
+      segments(i, -min(included_idx), i, -max(included_idx), col = "#4a4a4a", lwd = 2)
+    }
+  }
+  
+  # Set name labels on right
+  for (j in 1:n_sets) {
+    text(n_ints + 0.5, -j, set_names[j], adj = 0, cex = 0.9, col = colors[j], font = 2)
+  }
+  
+  axis(2, at = seq(0, max(counts), length.out = 5), las = 1)
+  mtext("Intersection Size", side = 2, line = 2.5, cex = 0.9)
+}
+
+# UI
+ui <- page_sidebar(
+  title = "VennCompare",
+  theme = bs_theme(bootswatch = "flatly"),
+  
+  sidebar = sidebar(
+    width = 350,
+    
+    numericInput("n_sets", "Number of sets:", value = 4, min = 2, max = 7, step = 1),
+    
+    selectInput("case_handling", "Case handling:",
+                choices = c("As is" = "asis", "UPPERCASE" = "upper", "lowercase" = "lower")),
+    
+    checkboxInput("trim_whitespace", "Trim whitespace", value = TRUE),
+    checkboxInput("remove_empty", "Remove empty lines", value = TRUE),
+    
+    hr(),
+    
+    actionButton("example_btn", "Load Example", class = "btn-info btn-sm"),
+    actionButton("clear_btn", "Clear All", class = "btn-warning btn-sm"),
+    
+    hr(),
+    h6("Set Colors:"),
+    uiOutput("color_inputs"),
+    
+    hr(),
+    uiOutput("set_inputs"),
+    
+    hr(),
+    downloadButton("download_results", "Download Results", class = "btn-success btn-sm")
+  ),
+  
+  navset_card_tab(
+    nav_panel("Diagram",
+      plotOutput("venn_plot", height = "550px")
+    ),
+    nav_panel("Intersections",
+      layout_columns(
+        col_widths = c(4, 8),
+        card(
+          card_header("Select Intersection"),
+          div(style = "max-height: 450px; overflow-y: auto;",
+              uiOutput("intersection_list"))
+        ),
+        card(
+          card_header("Elements"),
+          uiOutput("selected_header"),
+          verbatimTextOutput("selected_elements"),
+          downloadButton("download_selected", "Download Selected", class = "btn-primary btn-sm")
+        )
+      )
+    ),
+    nav_panel("Summary",
+      tableOutput("summary_table")
+    ),
+    nav_panel("All Elements",
+      layout_columns(
+        col_widths = c(6, 6),
+        card(
+          card_header("Union (all unique)"),
+          verbatimTextOutput("union_elements"),
+          textOutput("union_count")
+        ),
+        card(
+          card_header("Common to all sets"),
+          verbatimTextOutput("common_elements"),
+          textOutput("common_count")
+        )
+      )
+    )
+  )
+)
+
+# Server
+server <- function(input, output, session) {
+  
+  rv <- reactiveValues(selected_intersection = NULL)
+  
+  # Default colors
+  default_colors <- c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", 
+                      "#FF7F00", "#A65628", "#F781BF")
+  
+  # Dynamic color inputs
+  output$color_inputs <- renderUI({
+    n <- input$n_sets
+    tagList(
+      lapply(1:n, function(i) {
+        div(style = "display: inline-block; margin-right: 10px; margin-bottom: 5px;",
+            tags$label(paste0("S", i), style = "font-size: 11px; margin-right: 3px;"),
+            tags$input(type = "color", id = paste0("color_", i),
+                       value = default_colors[i],
+                       style = "width: 35px; height: 25px; padding: 0; border: none; cursor: pointer;",
+                       class = "form-control shiny-bound-input"))
+      })
+    )
+  })
+  
+  # Dynamic set inputs
+  output$set_inputs <- renderUI({
+    n <- input$n_sets
+    tagList(
+      lapply(1:n, function(i) {
+        div(style = "margin-bottom: 10px;",
+            div(style = "display: flex; align-items: center; margin-bottom: 3px;",
+                textInput(paste0("set_name_", i), NULL, value = paste0("Set ", i), 
+                          width = "120px"),
+                span(style = "margin-left: 8px; background: #007bff; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px;",
+                     textOutput(paste0("count_", i), inline = TRUE)),
+                actionLink(paste0("clear_", i), "clear", style = "margin-left: 8px; font-size: 11px;")
+            ),
+            textAreaInput(paste0("set_", i), NULL,
+                          placeholder = "Paste elements (one per line)",
+                          height = "80px", width = "100%")
+        )
+      })
+    )
+  })
+  
+  # Get colors
+  get_colors <- reactive({
+    n <- input$n_sets
+    sapply(1:n, function(i) {
+      col <- input[[paste0("color_", i)]]
+      if (is.null(col)) default_colors[i] else col
+    })
+  })
+  
+  # Process sets
+  processed_sets <- reactive({
+    req(input$n_sets)
+    sets <- list()
+    
+    for (i in 1:input$n_sets) {
+      set_input <- input[[paste0("set_", i)]]
+      set_name <- input[[paste0("set_name_", i)]]
+      
+      if (!is.null(set_input) && nchar(set_input) > 0) {
+        elements <- strsplit(set_input, "\n")[[1]]
+        
+        if (input$trim_whitespace) elements <- trimws(elements)
+        if (input$remove_empty) elements <- elements[elements != ""]
+        
+        if (input$case_handling == "upper") {
+          elements <- toupper(elements)
+        } else if (input$case_handling == "lower") {
+          elements <- tolower(elements)
+        }
+        
+        elements <- unique(elements)
+        
+        if (length(elements) > 0) {
+          name <- if (!is.null(set_name) && nchar(set_name) > 0) set_name else paste0("Set ", i)
+          sets[[name]] <- elements
+        }
+      }
+    }
+    sets
+  })
+  
+  # Update counts
+  observe({
+    req(input$n_sets)
+    sets <- processed_sets()
+    for (i in 1:input$n_sets) {
+      local({
+        idx <- i
+        set_name <- input[[paste0("set_name_", idx)]]
+        count <- if (!is.null(set_name) && set_name %in% names(sets)) length(sets[[set_name]]) else 0
+        output[[paste0("count_", idx)]] <- renderText({ count })
+      })
+    }
+  })
+  
+  # Clear buttons
+  observe({
+    req(input$n_sets)
+    for (i in 1:input$n_sets) {
+      local({
+        idx <- i
+        observeEvent(input[[paste0("clear_", idx)]], {
+          updateTextAreaInput(session, paste0("set_", idx), value = "")
+        }, ignoreInit = TRUE)
+      })
+    }
+  })
+  
+  # Example data
+  observeEvent(input$example_btn, {
+    examples <- list(
+      c("BRCA1", "TP53", "EGFR", "KRAS", "MYC", "CDK4", "RB1", "PTEN", "AKT1", "BRAF"),
+      c("TP53", "EGFR", "MYC", "CDK4", "VEGFA", "HIF1A", "NOTCH1", "WNT1", "SHH", "STAT3"),
+      c("BRCA1", "TP53", "MYC", "PTEN", "AKT1", "PIK3CA", "MTOR", "MAPK1", "ERK1", "RAF1"),
+      c("EGFR", "KRAS", "MYC", "BRAF", "VEGFA", "HIF1A", "AKT1", "MEK1", "JNK1", "P38")
+    )
+    for (i in 1:min(input$n_sets, 4)) {
+      updateTextAreaInput(session, paste0("set_", i), value = paste(examples[[i]], collapse = "\n"))
+      updateTextInput(session, paste0("set_name_", i), value = paste0("Gene Set ", i))
+    }
+  })
+  
+  # Clear all
+  observeEvent(input$clear_btn, {
+    for (i in 1:7) {
+      updateTextAreaInput(session, paste0("set_", i), value = "")
+      updateTextInput(session, paste0("set_name_", i), value = paste0("Set ", i))
+    }
+  })
+  
+  # Main plot
+  output$venn_plot <- renderPlot({
+    sets <- processed_sets()
+    req(length(sets) >= 2)
+    colors <- get_colors()
+    
+    if (length(sets) <= 4) {
+      draw_venn(sets, colors)
+    } else {
+      draw_upset(sets, colors)
+    }
+  })
+  
+  # Intersections
+  intersections <- reactive({
+    sets <- processed_sets()
+    req(length(sets) >= 2)
+    compute_intersections(sets)
+  })
+  
+  # Intersection list
+  output$intersection_list <- renderUI({
+    ints <- intersections()
+    req(length(ints) > 0)
+    
+    ints <- ints[order(sapply(ints, function(x) -x$count))]
+    
+    tagList(
+      lapply(names(ints), function(name) {
+        count <- ints[[name]]$count
+        actionButton(
+          inputId = paste0("int_", gsub("[^a-zA-Z0-9]", "_", name)),
+          label = paste0(count, " - ", name),
+          class = "btn btn-light btn-sm",
+          style = "width: 100%; text-align: left; margin-bottom: 3px; font-size: 12px;"
+        )
+      })
+    )
+  })
+  
+  # Observe intersection clicks
+  observe({
+    ints <- intersections()
+    req(length(ints) > 0)
+    
+    for (name in names(ints)) {
+      local({
+        int_name <- name
+        btn_id <- paste0("int_", gsub("[^a-zA-Z0-9]", "_", int_name))
+        observeEvent(input[[btn_id]], {
+          rv$selected_intersection <- int_name
+        }, ignoreInit = TRUE)
+      })
+    }
+  })
+  
+  # Selected header
+  output$selected_header <- renderUI({
+    req(rv$selected_intersection)
+    ints <- intersections()
+    req(rv$selected_intersection %in% names(ints))
+    count <- ints[[rv$selected_intersection]]$count
+    
+    div(style = "background: #e8f4f8; padding: 10px; border-radius: 5px; margin-bottom: 10px; border-left: 4px solid #3498db;",
+        h5(style = "margin: 0;", rv$selected_intersection),
+        p(style = "margin: 5px 0 0 0; color: #666;", paste0(count, " element(s)"))
+    )
+  })
+  
+  # Selected elements
+  output$selected_elements <- renderText({
+    req(rv$selected_intersection)
+    ints <- intersections()
+    req(rv$selected_intersection %in% names(ints))
+    paste(ints[[rv$selected_intersection]]$elements, collapse = "\n")
+  })
+  
+  # Download selected
+  output$download_selected <- downloadHandler(
+    filename = function() {
+      name <- if (!is.null(rv$selected_intersection)) gsub("[^a-zA-Z0-9]", "_", rv$selected_intersection) else "intersection"
+      paste0(name, ".txt")
+    },
+    content = function(file) {
+      req(rv$selected_intersection)
+      ints <- intersections()
+      writeLines(ints[[rv$selected_intersection]]$elements, file)
+    }
+  )
+  
+  # Summary table
+  output$summary_table <- renderTable({
+    ints <- intersections()
+    req(length(ints) > 0)
+    
+    df <- data.frame(
+      Intersection = names(ints),
+      Count = sapply(ints, function(x) x$count),
+      Sets = sapply(ints, function(x) x$n_sets),
+      Elements = sapply(ints, function(x) paste(head(x$elements, 5), collapse = ", ")),
+      stringsAsFactors = FALSE
+    )
+    df$Elements <- sapply(1:nrow(df), function(i) {
+      if (ints[[i]]$count > 5) paste0(df$Elements[i], "...") else df$Elements[i]
+    })
+    df[order(-df$Count), ]
+  }, striped = TRUE, hover = TRUE, width = "100%")
+  
+  # Union
+  output$union_elements <- renderText({
+    sets <- processed_sets()
+    req(length(sets) >= 2)
+    paste(sort(unique(unlist(sets))), collapse = "\n")
+  })
+  
+  output$union_count <- renderText({
+    sets <- processed_sets()
+    req(length(sets) >= 2)
+    paste("Total:", length(unique(unlist(sets))))
+  })
+  
+  # Common
+  output$common_elements <- renderText({
+    sets <- processed_sets()
+    req(length(sets) >= 2)
+    common <- Reduce(intersect, sets)
+    if (length(common) > 0) paste(sort(common), collapse = "\n") else "(none)"
+  })
+  
+  output$common_count <- renderText({
+    sets <- processed_sets()
+    req(length(sets) >= 2)
+    paste("Total:", length(Reduce(intersect, sets)))
+  })
+  
+  # Download all
+  output$download_results <- downloadHandler(
+    filename = function() { paste0("venn_results_", Sys.Date(), ".csv") },
+    content = function(file) {
+      ints <- intersections()
+      df <- data.frame(
+        Intersection = names(ints),
+        Count = sapply(ints, function(x) x$count),
+        Sets_Involved = sapply(ints, function(x) paste(x$sets_included, collapse = ";")),
+        Elements = sapply(ints, function(x) paste(x$elements, collapse = ";")),
+        stringsAsFactors = FALSE
+      )
+      write.csv(df[order(-df$Count), ], file, row.names = FALSE)
+    }
+  )
+}
+
+shinyApp(ui, server)
+```
