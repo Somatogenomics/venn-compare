@@ -7,6 +7,14 @@ filters:
   - shinylive
 ---
 
+## Improvements
+
+- **Live per-set item counts in the sidebar:** Each set name now includes a small badge (for example, “15 items”) that updates immediately as you paste or edit entries. Counts reflect your case/whitespace options and de-duplication.
+- **Full region counts on the diagram (up to 4 sets):**
+  - **2 sets:** A only, A ∩ B, B only (3 regions)
+  - **3 sets:** all 7 mutually exclusive regions
+  - **4 sets:** all 15 mutually exclusive regions (non-zero regions are labeled to keep the plot readable)
+
 ```{shinylive-r}
 #| standalone: true
 #| viewerHeight: 700
