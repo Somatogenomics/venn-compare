@@ -130,6 +130,6 @@ This Shinylive version uses base R graphics instead of ggVennDiagram/UpSetR for 
 | Hosting | Requires R server | Any static host |
 
 ## Author
-
+Abdulhadi Kobiowu
 Built with Quarto + Shinylive
 Inspired by Venny (https://bioinfogp.cnb.csic.es/tools/venny/)

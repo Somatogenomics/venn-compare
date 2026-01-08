@@ -2,13 +2,6 @@ project:
   type: website
   output-dir: _site
 
-website:
-  title: "VennCompare"
-
 format:
   html:
     theme: flatly
-    toc: false
-
-filters:
-  - shinylive
