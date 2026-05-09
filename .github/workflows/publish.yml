@@ -36,7 +36,11 @@ jobs:
 
       - name: Setup Quarto
         uses: quarto-dev/quarto-actions/setup@v2
-      
+      - name: Install R render dependencies
+        run: |
+          Rscript -e 'install.packages(c("knitr", "rmarkdown", "shiny", "bslib", "jsonlite", "shinylive"), repos = "https://cloud.r-project.org")'
+          Rscript -e 'cat("knitr:", as.character(packageVersion("knitr")), "\n")'
+          Rscript -e 'cat("rmarkdown:", as.character(packageVersion("rmarkdown")), "\n")'
 
       - name: Install Shinylive extension
         run: |
