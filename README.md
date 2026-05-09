@@ -110,7 +110,7 @@ Assumptions surfaced in the *About* tab. The "Methods text" generated under *Rep
 
 ## Cite
 
-> Kobiowu S. *VennCompare* v2 (2026). [somatogenomics.github.io/venn-compare](https://somatogenomics.github.io/venn-compare/)
+> Kobiowu A. *VennCompare* v2 (2026). [somatogenomics.github.io/venn-compare](https://somatogenomics.github.io/venn-compare/)
 
 If you used the multi-set p-values, please also cite:
 
