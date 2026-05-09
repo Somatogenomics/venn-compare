@@ -1,6 +1,7 @@
 ---
 title: "VennCompare"
 subtitle: "Set comparison, statistics, and visualization — fully in your browser"
+engine: knitr
 format:
   html:
     page-layout: custom
