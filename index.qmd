@@ -1,388 +1,1646 @@
 ---
 title: "VennCompare"
+subtitle: "Set comparison, statistics, and visualization — fully in your browser"
 format:
   html:
-    page-layout: full
+    page-layout: custom
+    embed-resources: false
+    theme: cosmo
 filters:
   - shinylive
 ---
 
-## Improvements
-
-- **Live per-set item counts in the sidebar:** Each set name now includes a small badge (for example, “15 items”) that updates immediately as you paste or edit entries. Counts reflect your case/whitespace options and de-duplication.
-- **Full region counts on the diagram (up to 4 sets):**
-  - **2 sets:** A only, A ∩ B, B only (3 regions)
-  - **3 sets:** all 7 mutually exclusive regions
-  - **4 sets:** all 15 mutually exclusive regions (non-zero regions are labeled to keep the plot readable)
+::: {.app-frame}
 
 ```{shinylive-r}
 #| standalone: true
-#| viewerHeight: 700
+#| viewerHeight: 950
+
+# =====================================================================
+# VennCompare v2
+# Statistical, multi-mode set comparison — runs entirely in the browser
+# via WebR. Companion to https://github.com/Somatogenomics/venn-compare
+# =====================================================================
 
 library(shiny)
 library(bslib)
+library(jsonlite)
 
-# Compute exclusive intersections
-compute_intersections <- function(sets) {
-  if (length(sets) == 0) return(NULL)
+# ---------- Constants ----------
+PALETTE <- c("#c66b3d", "#3d7c98", "#5a8a5e", "#8e6b9e",
+             "#c0a050", "#7a8a98", "#b25a6f")
+INK     <- "#1a2332"
+INK2    <- "#4a5566"
+PAPER   <- "#fbfaf6"
+ACCENT  <- "#c66b3d"
+
+VC_VERSION <- "2.0.0"
+
+# =====================================================================
+# Helpers — parsing / data prep
+# =====================================================================
+
+parse_set_text <- function(txt, case_handling = "asis", trim_ws = TRUE) {
+  if (is.null(txt) || !nchar(txt)) return(character(0))
+  els <- unlist(strsplit(txt, "[\n\r,;\t]"))
+  if (trim_ws) els <- trimws(els)
+  els <- els[nchar(els) > 0]
+  els <- switch(case_handling,
+                upper = toupper(els),
+                lower = tolower(els),
+                els)
+  unique(els)
+}
+
+# Parse uploaded file → named list of sets
+parse_uploaded_file <- function(path, ext, case_handling, trim_ws,
+                                 sep = "auto", id_col = NULL,
+                                 set_col = NULL, has_header = TRUE) {
+  ext <- tolower(ext)
+  if (ext %in% c("gmt", "gmx")) {
+    lines <- readLines(path, warn = FALSE)
+    sets <- list()
+    for (ln in lines) {
+      if (!nchar(ln)) next
+      parts <- strsplit(ln, "\t", fixed = TRUE)[[1]]
+      if (length(parts) < 3) next
+      nm <- parts[1]
+      els <- parts[-c(1, 2)]
+      els <- els[nchar(els) > 0]
+      if (trim_ws) els <- trimws(els)
+      els <- switch(case_handling, upper = toupper(els),
+                    lower = tolower(els), els)
+      sets[[nm]] <- unique(els)
+    }
+    return(sets)
+  }
+  # delimited: csv / tsv / txt
+  s <- if (sep == "auto") {
+    if (ext %in% c("tsv", "tab", "txt")) "\t" else
+      if (ext == "csv") "," else
+        # peek
+        { hdr <- readLines(path, n = 1, warn = FALSE)
+          if (length(grep("\t", hdr))) "\t" else "," }
+  } else sep
+  df <- tryCatch(
+    read.table(path, header = has_header, sep = s, quote = "\"",
+               stringsAsFactors = FALSE, comment.char = "",
+               fill = TRUE, na.strings = c("", "NA")),
+    error = function(e) NULL
+  )
+  if (is.null(df) || !nrow(df)) return(list())
+
+  # Two layouts:
+  # A) Wide: each column is a set (column name = set name).
+  # B) Long: id_col + set_col specifying membership.
+  if (!is.null(id_col) && !is.null(set_col) &&
+      id_col %in% names(df) && set_col %in% names(df)) {
+    sets <- split(df[[id_col]], df[[set_col]])
+    sets <- lapply(sets, function(x) {
+      x <- as.character(x); x <- x[!is.na(x) & nchar(x) > 0]
+      if (trim_ws) x <- trimws(x)
+      x <- switch(case_handling, upper = toupper(x),
+                  lower = tolower(x), x)
+      unique(x)
+    })
+    return(sets)
+  }
+  # wide: each column = set
+  sets <- lapply(df, function(col) {
+    x <- as.character(col); x <- x[!is.na(x) & nchar(x) > 0]
+    if (trim_ws) x <- trimws(x)
+    x <- switch(case_handling, upper = toupper(x),
+                lower = tolower(x), x)
+    unique(x)
+  })
+  sets
+}
+
+# =====================================================================
+# Set algebra — exclusive intersections
+# =====================================================================
+
+compute_exclusive_intersections <- function(sets) {
+  if (!length(sets)) return(list())
   set_names <- names(sets)
   n <- length(sets)
   results <- list()
-  
   for (i in 1:(2^n - 1)) {
     binary <- as.integer(intToBits(i))[1:n]
-    included <- which(binary == 1)
-    excluded <- which(binary == 0)
-    
-    if (length(included) == 1) {
-      intersection <- sets[[included]]
-    } else {
-      intersection <- Reduce(intersect, sets[included])
-    }
-    
-    if (length(excluded) > 0) {
-      for (ex in excluded) {
-        intersection <- setdiff(intersection, sets[[ex]])
-      }
-    }
-    
-    if (length(intersection) > 0) {
-      combo_name <- paste(set_names[included], collapse = " & ")
-      results[[combo_name]] <- list(
-        elements = intersection,
-        count = length(intersection),
-        sets_included = set_names[included],
-        n_sets = length(included)
-      )
+    inc <- which(binary == 1)
+    exc <- which(binary == 0)
+    x <- if (length(inc) == 1) sets[[inc]] else Reduce(intersect, sets[inc])
+    for (e in exc) x <- setdiff(x, sets[[e]])
+    if (length(x)) {
+      key <- paste(set_names[inc], collapse = " ∩ ")
+      results[[key]] <- list(elements = x, count = length(x),
+                             sets_included = set_names[inc],
+                             n_sets = length(inc), bitmask = i)
     }
   }
-  return(results)
+  results
 }
 
-ui <- page_sidebar(
+# Inclusive: |A1 ∩ A2 ∩ ... ∩ Ak| (regardless of others)
+compute_inclusive_intersections <- function(sets) {
+  if (!length(sets)) return(list())
+  set_names <- names(sets); n <- length(sets); results <- list()
+  for (i in 1:(2^n - 1)) {
+    binary <- as.integer(intToBits(i))[1:n]
+    inc <- which(binary == 1)
+    x <- if (length(inc) == 1) sets[[inc]] else Reduce(intersect, sets[inc])
+    key <- paste(set_names[inc], collapse = " ∩ ")
+    results[[key]] <- list(elements = x, count = length(x),
+                           sets_included = set_names[inc],
+                           n_sets = length(inc))
+  }
+  results
+}
 
-title = "VennCompare",
-theme = bs_theme(bootswatch = "flatly"),
+# =====================================================================
+# Pairwise similarity / counts
+# =====================================================================
 
-sidebar = sidebar(
-  width = 320,
-  numericInput("n_sets", "Number of sets:", value = 4, min = 2, max = 7, step = 1),
-  selectInput("case_handling", "Case handling:",
-              choices = c("As is" = "asis", "UPPERCASE" = "upper", "lowercase" = "lower")),
-  checkboxInput("trim_ws", "Trim whitespace", TRUE),
-  hr(),
-  actionButton("example_btn", "Load Example", class = "btn-info btn-sm"),
-  actionButton("clear_btn", "Clear All", class = "btn-warning btn-sm"),
-  hr(),
-  uiOutput("set_inputs")
-),
+pairwise_similarity <- function(sets, metric = "jaccard") {
+  n <- length(sets)
+  M <- matrix(NA_real_, n, n, dimnames = list(names(sets), names(sets)))
+  for (i in 1:n) for (j in 1:n) {
+    a <- sets[[i]]; b <- sets[[j]]
+    inter <- length(intersect(a, b))
+    M[i, j] <- switch(metric,
+      jaccard = { u <- length(union(a, b)); if (u) inter / u else NA_real_ },
+      overlap = { mn <- min(length(a), length(b)); if (mn) inter / mn else NA_real_ },
+      dice    = { sm <- length(a) + length(b); if (sm) 2 * inter / sm else NA_real_ }
+    )
+  }
+  M
+}
 
-navset_card_tab(
-  nav_panel("Diagram", plotOutput("main_plot", height = "500px")),
-  nav_panel("Intersections",
-    layout_columns(
-      col_widths = c(5, 7),
-      card(card_header("Intersections"), 
-           div(style = "max-height:400px;overflow-y:auto;", uiOutput("int_list"))),
-      card(card_header("Elements"), 
-           uiOutput("sel_header"),
-           verbatimTextOutput("sel_elements"))
+pairwise_counts <- function(sets) {
+  n <- length(sets)
+  M <- matrix(0L, n, n, dimnames = list(names(sets), names(sets)))
+  for (i in 1:n) for (j in 1:n) M[i, j] <- length(intersect(sets[[i]], sets[[j]]))
+  M
+}
+
+# =====================================================================
+# Statistics
+# =====================================================================
+
+# Pairwise Fisher's exact (one-sided, enrichment of overlap)
+pairwise_fisher <- function(sets, universe_size) {
+  n <- length(sets)
+  P <- matrix(NA_real_, n, n, dimnames = list(names(sets), names(sets)))
+  diag(P) <- NA_real_
+  for (i in seq_len(n - 1)) for (j in (i + 1):n) {
+    a <- sets[[i]]; b <- sets[[j]]
+    ab <- length(intersect(a, b))
+    a_only <- length(a) - ab
+    b_only <- length(b) - ab
+    neither <- universe_size - ab - a_only - b_only
+    if (neither < 0 || any(c(ab, a_only, b_only) < 0)) next
+    tab <- matrix(c(ab, a_only, b_only, neither), 2, 2)
+    P[i, j] <- P[j, i] <- tryCatch(
+      fisher.test(tab, alternative = "greater")$p.value,
+      error = function(e) NA_real_)
+  }
+  P
+}
+
+# SuperExactTest-style p-value (Wang, Zhao, Sherman 2015)
+# P(|∩ Ai| ≥ k) given set sizes s_i drawn independently from universe N.
+# log P(X = x) = lchoose(N, x) + Σ [lchoose(N - x, s_i - x) - lchoose(N, s_i)]
+# Sum exp(log P(X=x)) for x in [k, min(s_i)] with log-sum-exp trick.
+multiset_pvalue <- function(set_sizes, observed_k, universe_size) {
+  N <- universe_size
+  s <- as.numeric(set_sizes)
+  if (any(s > N) || observed_k > min(s) || observed_k < 0) return(NA_real_)
+  if (observed_k == 0) return(1)
+  xs <- seq(observed_k, floor(min(s)))
+  lp <- sapply(xs, function(x) {
+    if (any(N - x < s - x)) return(-Inf)
+    lchoose(N, x) + sum(lchoose(N - x, s - x) - lchoose(N, s))
+  })
+  fin <- lp[is.finite(lp)]
+  if (!length(fin)) return(NA_real_)
+  m <- max(fin)
+  exp(m) * sum(exp(lp - m))
+}
+
+# Expected size of multi-set intersection under independence
+multiset_expected <- function(set_sizes, universe_size) {
+  N <- universe_size
+  if (N == 0) return(NA_real_)
+  prod(set_sizes / N) * N
+}
+
+# BH-adjust p-values (vector)
+bh_adjust <- function(p) p.adjust(p, method = "BH")
+
+# =====================================================================
+# Set algebra parser  —  &  |  !  -  parens
+# =====================================================================
+
+parse_set_query <- function(query, sets, universe) {
+  if (!nchar(trimws(query))) return(list(error = "Empty query"))
+  if (!length(sets)) return(list(error = "No sets defined"))
+  env <- new.env()
+  for (i in seq_along(sets))
+    assign(paste0("S", i), universe %in% sets[[i]], envir = env)
+
+  q <- query
+  q <- gsub("∩", "&", q, fixed = TRUE)
+  q <- gsub("∪", "|", q, fixed = TRUE)
+  q <- gsub("\u00AC", "!", q, fixed = TRUE)   # ¬
+  q <- gsub("\\", "-", q, fixed = TRUE)         # backslash → setdiff
+  q <- gsub("\\bAND\\b", "&", q, perl = TRUE, ignore.case = TRUE)
+  q <- gsub("\\bOR\\b",  "|", q, perl = TRUE, ignore.case = TRUE)
+  q <- gsub("\\bNOT\\b", "!", q, perl = TRUE, ignore.case = TRUE)
+
+  # Substitute set names → S1, S2, … (longest first to avoid prefix collisions)
+  ord <- order(-nchar(names(sets)))
+  for (i in ord) {
+    nm <- names(sets)[i]
+    pat <- paste0("\\b", gsub("([.+*?\\\\^$()\\[\\]|{}])", "\\\\\\1", nm), "\\b")
+    q <- gsub(pat, paste0("S", i), q, perl = TRUE)
+  }
+
+  # Convert "x - y" to "x & !(y)" (paren-aware via iteration)
+  prev <- ""
+  while (q != prev) {
+    prev <- q
+    q <- gsub("(\\w+|\\([^()]+\\))\\s*-\\s*(\\w+|\\([^()]+\\))",
+              "(\\1 & !(\\2))", q, perl = TRUE)
+  }
+
+  result <- tryCatch(eval(parse(text = q), envir = env),
+                     error = function(e) e)
+  if (inherits(result, "error"))
+    return(list(error = paste("Parse error:", conditionMessage(result))))
+  if (!is.logical(result) || length(result) != length(universe))
+    return(list(error = "Query did not yield a valid set"))
+  list(elements = universe[result], count = sum(result),
+       expanded = q)
+}
+
+# =====================================================================
+# Plotting
+# =====================================================================
+
+vc_par <- function() par(family = "sans", col.main = INK,
+                          col.lab = INK2, col.axis = INK2, fg = INK)
+
+draw_venn <- function(sets, palette = PALETTE) {
+  n <- length(sets)
+  if (n == 4) return(draw_venn4_ellipses(sets, palette))
+  if (n == 5) return(draw_venn5_ellipses(sets, palette))
+  if (n > 5)  { plot.new(); text(0.5, 0.5,
+                  "Use UpSet plot for \u2265 6 sets",
+                  cex = 1.3, col = INK2); return(invisible()) }
+
+  cols <- palette[seq_len(n)]
+  vc_par()
+  par(mar = c(1, 1, 2, 1))
+  plot(0, 0, type = "n", xlim = c(-4, 4), ylim = c(-4, 4),
+       asp = 1, axes = FALSE, xlab = "", ylab = "")
+
+  if (n == 2) {
+    centers <- list(c(-1, 0), c(1, 0)); r <- 1.8
+    lblpos <- list(c(-2.7, 2), c(2.7, 2))
+    rp <- list(c(-1.8, 0), c(0, 0), c(1.8, 0))
+  } else if (n == 3) {
+    centers <- list(c(-1, 0.6), c(1, 0.6), c(0, -1)); r <- 1.6
+    lblpos <- list(c(-2.7, 2.3), c(2.7, 2.3), c(0, -3.1))
+    rp <- list(c(-1.7, 1), c(1.7, 1), c(0, -1.7),
+               c(0, 1.1), c(-0.95, -0.3), c(0.95, -0.3), c(0, 0))
+  }
+
+  theta <- seq(0, 2 * pi, length.out = 200)
+  for (i in 1:n) {
+    x <- centers[[i]][1] + r * cos(theta)
+    y <- centers[[i]][2] + r * sin(theta)
+    polygon(x, y, border = cols[i], col = adjustcolor(cols[i], 0.18), lwd = 2.2)
+    text(lblpos[[i]][1], lblpos[[i]][2], names(sets)[i],
+         col = cols[i], font = 2, cex = 1.15)
+  }
+
+  # counts per exclusive region
+  if (n == 2) {
+    A <- sets[[1]]; B <- sets[[2]]
+    cnts <- c(length(setdiff(A, B)), length(intersect(A, B)),
+              length(setdiff(B, A)))
+  } else {
+    A <- sets[[1]]; B <- sets[[2]]; C <- sets[[3]]
+    cnts <- c(length(setdiff(setdiff(A, B), C)),
+              length(setdiff(setdiff(B, A), C)),
+              length(setdiff(setdiff(C, A), B)),
+              length(setdiff(intersect(A, B), C)),
+              length(setdiff(intersect(A, C), B)),
+              length(setdiff(intersect(B, C), A)),
+              length(Reduce(intersect, sets)))
+  }
+  for (i in seq_along(rp))
+    text(rp[[i]][1], rp[[i]][2], cnts[i], cex = 1.2, font = 2, col = INK)
+  invisible()
+}
+
+# 4-set Venn using rotated ellipses (after Edwards / standard 4-ellipse layout)
+draw_venn4_ellipses <- function(sets, palette = PALETTE) {
+  cols <- palette[1:4]
+  vc_par()
+  par(mar = c(1, 1, 2, 1))
+  plot(0, 0, type = "n", xlim = c(-5, 5), ylim = c(-5, 5),
+       asp = 1, axes = FALSE, xlab = "", ylab = "")
+  # parameters: 4 ellipses tilted at ±45°, offset to give a 15-region layout
+  # Standard layout (Edwards/Venn 4-ellipse). a/b are semi-axes, t is tilt angle.
+  ells <- list(
+    list(cx = -0.7, cy = 0.4,  a = 2.3, b = 1.0, t =  45),
+    list(cx = -0.2, cy = 0.4,  a = 2.3, b = 1.0, t =  45),
+    list(cx =  0.2, cy = 0.4,  a = 2.3, b = 1.0, t = 135),
+    list(cx =  0.7, cy = 0.4,  a = 2.3, b = 1.0, t = 135)
+  )
+  draw_ellipse <- function(cx, cy, a, b, t, col) {
+    th <- seq(0, 2 * pi, length.out = 200)
+    x <- a * cos(th); y <- b * sin(th)
+    rad <- t * pi / 180
+    xr <- x * cos(rad) - y * sin(rad) + cx
+    yr <- x * sin(rad) + y * cos(rad) + cy
+    polygon(xr, yr, border = col, col = adjustcolor(col, 0.16), lwd = 2)
+  }
+  for (i in 1:4) with(ells[[i]], draw_ellipse(cx, cy, a, b, t, cols[i]))
+  lblpos <- list(c(-3.4, 2.4), c(-1.5, 3.4), c(1.5, 3.4), c(3.4, 2.4))
+  for (i in 1:4)
+    text(lblpos[[i]][1], lblpos[[i]][2], names(sets)[i],
+         col = cols[i], font = 2, cex = 1.15)
+
+  A <- sets[[1]]; B <- sets[[2]]; C <- sets[[3]]; D <- sets[[4]]
+  reg <- list(
+    Aonly = setdiff(setdiff(setdiff(A, B), C), D),
+    Bonly = setdiff(setdiff(setdiff(B, A), C), D),
+    Conly = setdiff(setdiff(setdiff(C, A), B), D),
+    Donly = setdiff(setdiff(setdiff(D, A), B), C),
+    AB    = setdiff(setdiff(intersect(A, B), C), D),
+    AC    = setdiff(setdiff(intersect(A, C), B), D),
+    AD    = setdiff(setdiff(intersect(A, D), B), C),
+    BC    = setdiff(setdiff(intersect(B, C), A), D),
+    BD    = setdiff(setdiff(intersect(B, D), A), C),
+    CD    = setdiff(setdiff(intersect(C, D), A), B),
+    ABC   = setdiff(Reduce(intersect, list(A, B, C)), D),
+    ABD   = setdiff(Reduce(intersect, list(A, B, D)), C),
+    ACD   = setdiff(Reduce(intersect, list(A, C, D)), B),
+    BCD   = setdiff(Reduce(intersect, list(B, C, D)), A),
+    ABCD  = Reduce(intersect, list(A, B, C, D))
+  )
+  pos <- list(
+    Aonly = c(-3.1,  0.5), Bonly = c(-1.1,  2.1), Conly = c(1.1,  2.1), Donly = c(3.1,  0.5),
+    AB    = c(-1.5,  0.6), AC    = c(-0.6, -2.0), AD    = c(0.0,  1.8),
+    BC    = c( 0.0,  0.0), BD    = c( 0.6, -2.0), CD    = c(1.5,  0.6),
+    ABC   = c(-0.55, -0.8), ABD   = c(-0.45, 1.0), ACD   = c(0.45, 1.0), BCD   = c(0.55, -0.8),
+    ABCD  = c( 0.0,  0.0)
+  )
+  # ABCD overlaps with BC; offset BC slightly up:
+  pos$BC <- c(0, -0.55); pos$ABCD <- c(0, 0.4)
+  for (k in names(reg)) {
+    if (length(reg[[k]]))
+      text(pos[[k]][1], pos[[k]][2], length(reg[[k]]),
+           cex = 0.95, font = 2, col = INK)
+  }
+  invisible()
+}
+
+# 5-set Venn — five rotated congruent ellipses (Branko Grünbaum style)
+draw_venn5_ellipses <- function(sets, palette = PALETTE) {
+  cols <- palette[1:5]
+  vc_par()
+  par(mar = c(1, 1, 2, 1))
+  plot(0, 0, type = "n", xlim = c(-4, 4), ylim = c(-4, 4),
+       asp = 1, axes = FALSE, xlab = "", ylab = "")
+  draw_ellipse <- function(cx, cy, a, b, t, col) {
+    th <- seq(0, 2 * pi, length.out = 240)
+    x <- a * cos(th); y <- b * sin(th)
+    rad <- t * pi / 180
+    xr <- x * cos(rad) - y * sin(rad) + cx
+    yr <- x * sin(rad) + y * cos(rad) + cy
+    polygon(xr, yr, border = col, col = adjustcolor(col, 0.14), lwd = 2)
+  }
+  # 5 congruent ellipses rotated 72° apart around origin, slightly offset
+  a <- 2.6; b <- 1.05; r0 <- 0.7
+  for (i in 0:4) {
+    ang <- 90 + i * 72
+    cx <- r0 * cos((ang - 90) * pi / 180)
+    cy <- r0 * sin((ang - 90) * pi / 180)
+    draw_ellipse(cx, cy, a, b, ang, cols[i + 1])
+  }
+  for (i in 0:4) {
+    ang <- 90 + i * 72
+    rl <- 3.6
+    lx <- rl * cos((ang - 90) * pi / 180)
+    ly <- rl * sin((ang - 90) * pi / 180)
+    text(lx, ly, names(sets)[i + 1], col = cols[i + 1], font = 2, cex = 1.05)
+  }
+  text(0, -3.7, "Region counts: see Intersections tab",
+       cex = 0.75, col = INK2, font = 3)
+  invisible()
+}
+
+# UpSet plot — fully custom base-R implementation (works for any n)
+draw_upset <- function(sets, top_n = 30, sort_by = "count",
+                        palette = PALETTE, highlight = NULL) {
+  ints <- compute_exclusive_intersections(sets)
+  if (!length(ints)) { plot.new(); text(0.5, 0.5, "No intersections"); return(invisible()) }
+  cnts <- sapply(ints, function(x) x$count)
+  deg <- sapply(ints, function(x) x$n_sets)
+  ord <- if (sort_by == "degree") order(deg, -cnts) else order(-cnts)
+  ints <- ints[ord]
+  if (length(ints) > top_n) ints <- ints[seq_len(top_n)]
+
+  set_names <- names(sets)
+  n_sets <- length(set_names)
+  n_int <- length(ints)
+  set_sizes <- vapply(sets, length, integer(1))
+
+  vc_par()
+  layout(matrix(c(1, 2, 3, 4), 2, 2, byrow = TRUE),
+         widths = c(1.1, 3.4), heights = c(2.2, max(1.1, n_sets * 0.18)))
+
+  # 1. top-left empty
+  par(mar = c(0.3, 0.3, 1.2, 0.3)); plot.new()
+
+  # 2. top-right bars
+  par(mar = c(0.3, 0.3, 2.2, 0.6))
+  hi <- if (!is.null(highlight) && highlight %in% names(ints))
+        which(names(ints) == highlight) else integer(0)
+  bar_cols <- rep(INK, n_int); if (length(hi)) bar_cols[hi] <- ACCENT
+  bp <- barplot(sapply(ints, function(x) x$count), col = bar_cols,
+                border = NA, names.arg = rep("", n_int),
+                axes = TRUE, las = 1)
+  title(main = "Intersection size", line = 0.6, adj = 0,
+        col.main = INK, font.main = 1, cex.main = 1)
+  text(bp, sapply(ints, function(x) x$count),
+       labels = sapply(ints, function(x) x$count),
+       pos = 3, cex = 0.7, xpd = NA, col = INK2)
+
+  # 3. bottom-left set-size bars (horizontal)
+  par(mar = c(3.4, 6.2, 0.4, 0.4))
+  barplot(rev(set_sizes), horiz = TRUE,
+          names.arg = rev(set_names), col = INK2,
+          border = NA, las = 1, xlab = "Set size",
+          cex.names = 0.8, cex.axis = 0.75, col.axis = INK2)
+
+  # 4. bottom-right dot matrix
+  par(mar = c(3.4, 0.3, 0.4, 0.6))
+  plot(NA, xlim = c(0.5, n_int + 0.5),
+       ylim = c(0.5, n_sets + 0.5),
+       xaxt = "n", yaxt = "n", bty = "n", xlab = "", ylab = "")
+  for (s_i in 1:n_sets) {
+    if (s_i %% 2 == 0)
+      rect(0.5, s_i - 0.5, n_int + 0.5, s_i + 0.5,
+           col = "#eef0f3", border = NA)
+  }
+  for (col_i in seq_along(ints)) {
+    in_int <- set_names %in% ints[[col_i]]$sets_included
+    in_int_rev <- rev(in_int)
+    points(rep(col_i, n_sets), 1:n_sets,
+           pch = 19, col = "#cbd0d8", cex = 1.4)
+    if (any(in_int_rev)) {
+      ys <- which(in_int_rev)
+      col_dot <- if (col_i %in% hi) ACCENT else INK
+      points(rep(col_i, length(ys)), ys, pch = 19, col = col_dot, cex = 1.65)
+      if (length(ys) > 1)
+        segments(col_i, min(ys), col_i, max(ys), col = col_dot, lwd = 2)
+    }
+  }
+  invisible()
+}
+
+draw_sim_heatmap <- function(M, title = "Jaccard similarity",
+                              fmt = "%.2f", zlim = NULL) {
+  n <- nrow(M)
+  vc_par()
+  layout(matrix(c(1, 2), 1, 2), widths = c(6, 0.8))
+  par(mar = c(6, 6, 3, 0.4))
+  pal <- colorRampPalette(c("#fbfaf6", "#f1d6c4", ACCENT, INK))(120)
+  if (is.null(zlim)) {
+    rng <- range(M, na.rm = TRUE)
+    zmin <- min(0, rng[1]); zmax <- max(1, rng[2])
+  } else { zmin <- zlim[1]; zmax <- zlim[2] }
+  image(1:n, 1:n, t(M[n:1, , drop = FALSE]), col = pal,
+        axes = FALSE, xlab = "", ylab = "", main = title,
+        zlim = c(zmin, zmax))
+  axis(1, at = 1:n, labels = colnames(M), las = 2, cex.axis = 0.85, col = NA, col.ticks = INK2)
+  axis(2, at = 1:n, labels = rev(rownames(M)), las = 1, cex.axis = 0.85, col = NA, col.ticks = INK2)
+  for (i in 1:n) for (j in 1:n) {
+    val <- M[n - j + 1, i]
+    if (!is.na(val))
+      text(i, j, sprintf(fmt, val),
+           col = if (val > (zmin + zmax) / 2) "white" else INK,
+           cex = 0.85)
+  }
+  par(mar = c(6, 0.6, 3, 4))
+  ly <- seq(zmin, zmax, length.out = 120)
+  image(1, ly, matrix(ly, 1, 120), col = pal, axes = FALSE, xlab = "", ylab = "")
+  axis(4, las = 1, cex.axis = 0.75, col.axis = INK2, col = NA, col.ticks = INK2)
+  invisible()
+}
+
+draw_intersection_bar <- function(sets, top_n = 20, palette = PALETTE) {
+  ints <- compute_exclusive_intersections(sets)
+  if (!length(ints)) { plot.new(); text(0.5, 0.5, "No intersections"); return(invisible()) }
+  cnts <- sapply(ints, function(x) x$count)
+  ord <- order(-cnts); ints <- ints[ord]
+  if (length(ints) > top_n) ints <- ints[seq_len(top_n)]
+  vc_par(); par(mar = c(4, 14, 2, 2))
+  cnts <- sapply(ints, function(x) x$count)
+  barplot(rev(cnts), horiz = TRUE, names.arg = rev(names(ints)),
+          col = INK, border = NA, las = 1, xlab = "Count",
+          cex.names = 0.8, cex.axis = 0.85,
+          main = sprintf("Top %d intersections", length(ints)))
+  invisible()
+}
+
+# =====================================================================
+# Reproducibility — generate R code that recreates the analysis
+# =====================================================================
+
+generate_repro_code <- function(sets, universe_size, plot_type, metric) {
+  set_lits <- vapply(seq_along(sets), function(i) {
+    nm <- names(sets)[i]; els <- sets[[i]]
+    sprintf('"%s" = c(%s)', nm, paste0('"', els, '"', collapse = ", "))
+  }, character(1))
+  code <- c(
+    "# Generated by VennCompare v2",
+    sprintf("# %s", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
+    "",
+    "library(eulerr)   # area-proportional Venn (optional)",
+    "library(UpSetR)   # UpSet plots (optional)",
+    "",
+    "# 1. Define sets",
+    "sets <- list(",
+    paste0("  ", set_lits, c(rep(",", length(set_lits) - 1), "")),
+    ")",
+    "",
+    "# 2. Universe (background) for hypergeometric statistics",
+    sprintf("universe_size <- %d   # union of sets used as default", universe_size),
+    "",
+    "# 3. Compute all 2^n − 1 mutually exclusive intersections",
+    "compute_exclusive_intersections <- function(sets) {",
+    "  n <- length(sets); set_names <- names(sets); res <- list()",
+    "  for (i in 1:(2^n - 1)) {",
+    "    b <- as.integer(intToBits(i))[1:n]",
+    "    inc <- which(b == 1); exc <- which(b == 0)",
+    "    x <- if (length(inc) == 1) sets[[inc]] else Reduce(intersect, sets[inc])",
+    "    for (e in exc) x <- setdiff(x, sets[[e]])",
+    "    if (length(x)) res[[paste(set_names[inc], collapse=' ∩ ')]] <-",
+    "      list(elements = x, count = length(x), sets = set_names[inc])",
+    "  }",
+    "  res",
+    "}",
+    "intersections <- compute_exclusive_intersections(sets)",
+    "",
+    "# 4. Pairwise overlap statistics (Fisher's exact, one-sided)",
+    "pairwise_fisher <- function(sets, N) {",
+    "  n <- length(sets)",
+    "  P <- matrix(NA_real_, n, n, dimnames = list(names(sets), names(sets)))",
+    "  for (i in seq_len(n - 1)) for (j in (i + 1):n) {",
+    "    a <- sets[[i]]; b <- sets[[j]]; ab <- length(intersect(a, b))",
+    "    tab <- matrix(c(ab, length(a) - ab, length(b) - ab,",
+    "                    N - ab - (length(a) - ab) - (length(b) - ab)), 2, 2)",
+    "    P[i, j] <- P[j, i] <- fisher.test(tab, alternative = 'greater')$p.value",
+    "  }",
+    "  P",
+    "}",
+    "fisher_p <- pairwise_fisher(sets, universe_size)",
+    "",
+    "# 5. Multi-set intersection p-value (SuperExactTest formula;",
+    "#    Wang, Zhao, Sherman. Sci Rep 2015. doi:10.1038/srep16923)",
+    "multiset_pvalue <- function(set_sizes, k, N) {",
+    "  s <- as.numeric(set_sizes)",
+    "  if (any(s > N) || k > min(s) || k < 0) return(NA)",
+    "  if (k == 0) return(1)",
+    "  xs <- seq(k, floor(min(s)))",
+    "  lp <- sapply(xs, function(x) {",
+    "    if (any(N - x < s - x)) return(-Inf)",
+    "    lchoose(N, x) + sum(lchoose(N - x, s - x) - lchoose(N, s))",
+    "  })",
+    "  m <- max(lp[is.finite(lp)])",
+    "  exp(m) * sum(exp(lp - m))",
+    "}",
+    "# Example: full-overlap p-value across all sets",
+    "k_obs   <- length(Reduce(intersect, sets))",
+    "p_multi <- multiset_pvalue(sapply(sets, length), k_obs, universe_size)",
+    "",
+    sprintf("# 6. Visualization \u2014 '%s' was selected; use eulerr / UpSetR for publication-quality output", plot_type),
+    "# Suggested:",
+    "#   eulerr::plot(eulerr::euler(sets, shape = 'ellipse'), quantities = TRUE)",
+    "#   UpSetR::upset(UpSetR::fromList(sets), nsets = length(sets), order.by = 'freq')",
+    "",
+    sprintf("# Citation: VennCompare v%s (2026). https://somatogenomics.github.io/venn-compare/", VC_VERSION),
+    "# Underlying statistics: Wang M, Zhao Y, Sherman BT. Sci Rep 2015;5:16923."
+  )
+  paste(code, collapse = "\n")
+}
+
+generate_methods_text <- function(sets, universe_size, source = "manual entry") {
+  n <- length(sets); sizes <- vapply(sets, length, integer(1))
+  paste0(
+    "Set comparisons were performed with VennCompare v", VC_VERSION,
+    " (Kobiowu, 2026; https://somatogenomics.github.io/venn-compare/), ",
+    "running entirely in-browser via Quarto Shinylive (R / WebAssembly). ",
+    sprintf("%d sets (%s; sizes: %s) were analysed against a background ",
+            n, paste(names(sets), collapse = ", "),
+            paste(sizes, collapse = ", ")),
+    sprintf("universe of %d elements. ", universe_size),
+    "Mutually exclusive region counts were enumerated for all 2^n − 1 ",
+    "intersections. Pairwise overlap enrichment was assessed with one-sided ",
+    "Fisher's exact tests; multi-set intersection significance was computed ",
+    "with the hypergeometric formulation of Wang, Zhao & Sherman ",
+    "(Sci Rep 2015;5:16923). P-values were adjusted across families with ",
+    "the Benjamini–Hochberg procedure. Source: ", source, "."
+  )
+}
+
+# =====================================================================
+# Examples (agnostic + genomics)
+# =====================================================================
+
+EXAMPLES <- list(
+  "agnostic_4" = list(
+    title = "Survey responses (agnostic, 4 sets)",
+    sets = list(
+      "Group A" = c("apple","banana","cherry","date","elderberry","fig","grape","honeydew"),
+      "Group B" = c("apple","cherry","fig","grape","kiwi","lemon","mango"),
+      "Group C" = c("banana","fig","grape","mango","nectarine","orange","papaya"),
+      "Group D" = c("cherry","grape","kiwi","mango","orange","plum","quince")
     )
   ),
-  nav_panel("Summary", tableOutput("summary_tbl")),
-  nav_panel("Union/Common",
-    layout_columns(
-      col_widths = c(6, 6),
-      card(card_header("Union"), verbatimTextOutput("union_out")),
-      card(card_header("Common to all"), verbatimTextOutput("common_out"))
+  "genes_cancer_4" = list(
+    title = "Cancer pathway genes (4 sets)",
+    sets = list(
+      "DNA repair"  = c("BRCA1","TP53","ATM","CHEK2","RAD51","BRCA2","MLH1","MSH2","PALB2"),
+      "Apoptosis"   = c("TP53","BAX","BAK1","BCL2","CASP3","CASP9","FAS","CYCS","BID"),
+      "Cell cycle"  = c("TP53","CDK4","CDK6","CCND1","RB1","CDKN2A","MYC","E2F1","CCNE1"),
+      "Growth"      = c("EGFR","KRAS","MYC","BRAF","PIK3CA","AKT1","MTOR","RAF1","MAP2K1")
+    )
+  ),
+  "deg_timecourse_6" = list(
+    title = "DE genes across 6 timepoints",
+    sets = list(
+      "0 h"  = paste0("Gene", c(1, 2, 3, 5, 8, 13, 21, 34, 55, 89)),
+      "2 h"  = paste0("Gene", c(2, 3, 5, 8, 13, 21, 34, 55, 89, 100, 110, 120)),
+      "6 h"  = paste0("Gene", c(5, 8, 13, 21, 34, 55, 89, 100, 110, 120, 130, 140, 150)),
+      "12 h" = paste0("Gene", c(13, 21, 34, 55, 89, 100, 130, 150, 160, 170, 180)),
+      "24 h" = paste0("Gene", c(34, 55, 89, 130, 150, 170, 180, 190, 200, 210)),
+      "48 h" = paste0("Gene", c(55, 89, 150, 180, 200, 210, 220, 230, 240, 250))
+    )
+  ),
+  "go_overlap_7" = list(
+    title = "Pathway gene-set overlap (7 sets, GO-style)",
+    sets = list(
+      "GO:cilium"         = c("IFT88","IFT122","CEP164","DYNC2H1","BBS1","ARL13B","RPGR","KIF3A","CEP290"),
+      "GO:flagellum"      = c("DYNC2H1","KIF3A","SPAG6","SPAG16","CFAP44","CFAP43","DRC1","DNAH5","DNAH8"),
+      "GO:axoneme"        = c("DYNC2H1","KIF3A","SPAG6","CFAP44","DRC1","DNAH5","DNAH8","ODF2","TEKT1"),
+      "GO:microtubule"    = c("TUBA1A","TUBB3","KIF3A","DYNC2H1","MAP2","STMN1","TPX2","NDE1","NDEL1"),
+      "GO:spermatogenesis"= c("SPAG6","SPAG16","DAZL","SYCP3","STRA8","DDX4","TEKT1","ODF2","DNAH5"),
+      "GO:protein_traffic"= c("RAB1A","RAB6A","SEC23A","COPB1","KIF3A","ARFGAP1","SAR1A","SEC31A","TMED2"),
+      "GO:cell_motility"  = c("ARL13B","KIF3A","DNAH5","DNAH8","ROCK1","CDC42","RHOA","WASF2","ACTN1")
     )
   )
 )
+
+# =====================================================================
+# UI helpers
+# =====================================================================
+
+custom_css <- HTML(sprintf("
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  body, .navbar, .nav-tabs, .form-control, .btn, .card { font-family: 'Manrope', system-ui, sans-serif !important; color: %s; }
+  h1, h2, h3, h4, .card-header, .navbar-brand { font-family: 'Fraunces', Georgia, serif !important; font-weight: 600; letter-spacing: -0.01em; }
+  .navbar { background: %s !important; border-bottom: 3px solid %s; }
+  .navbar-brand { color: %s !important; font-size: 1.4rem; }
+  .navbar-nav .nav-link { color: rgba(255,255,255,0.85) !important; }
+  .navbar-nav .nav-link.active { color: %s !important; background: rgba(255,255,255,0.06); border-radius: 6px; }
+  .card { border: 1px solid #e6e3da; box-shadow: 0 1px 0 rgba(26,35,50,0.04); }
+  .card-header { background: %s; border-bottom: 1px solid #ece9df; font-weight: 600; color: %s; padding: 0.65rem 1rem; }
+  .btn-primary { background: %s; border-color: %s; }
+  .btn-primary:hover { background: #b25c33; border-color: #b25c33; }
+  .badge-count { display: inline-block; padding: 2px 9px; border-radius: 11px; background: %s; color: white; font-size: 11px; font-weight: 600; min-width: 22px; text-align: center; }
+  .int-row { padding: 5px 9px; margin-bottom: 3px; border-radius: 5px; cursor: pointer; border: 1px solid transparent; transition: all 0.12s; font-size: 0.9rem; }
+  .int-row:hover { background: #f4ede4; border-color: %s; }
+  .int-row .ir-count { color: %s; font-weight: 700; margin-right: 8px; font-variant-numeric: tabular-nums; }
+  .pval-tag { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: %s; }
+  .pval-sig { color: %s; font-weight: 600; }
+  .universe-warn { background: #fff8ee; border-left: 3px solid #d4a04a; padding: 8px 12px; border-radius: 4px; margin-bottom: 8px; font-size: 0.85rem; color: #6b5223; }
+  .stat-pill { display: inline-block; background: %s; color: white; padding: 2px 9px; border-radius: 11px; font-size: 0.78rem; margin-right: 5px; font-family: 'JetBrains Mono', monospace; }
+  pre.repro { background: %s; color: #d6deeb; padding: 14px; border-radius: 6px; max-height: 480px; overflow-y: auto; font-size: 0.78rem; line-height: 1.45; }
+  .small-muted { font-size: 0.78rem; color: %s; }
+  .compare-tbl { font-size: 0.85rem; }
+  .compare-tbl th { background: %s; color: white; padding: 7px 10px; text-align: left; }
+  .compare-tbl td { padding: 6px 10px; border-bottom: 1px solid #ece9df; }
+  .download-row .btn { margin-right: 5px; }
+",
+  INK,
+  INK,         # navbar bg
+  ACCENT,
+  PAPER,       # brand color
+  ACCENT,      # active tab text
+  PAPER,       # card-header bg
+  INK,         # card-header text
+  ACCENT, ACCENT,
+  ACCENT,      # badge bg
+  ACCENT,      # int row hover border
+  ACCENT,      # ir-count
+  INK2,        # pval text
+  ACCENT,      # pval-sig
+  INK2,        # stat-pill bg
+  INK,         # repro pre bg
+  INK2,        # small-muted
+  INK          # compare-tbl header bg
+))
+
+ui <- page_navbar(
+  title = "VennCompare",
+  theme = bs_theme(bootswatch = "cosmo", primary = ACCENT,
+                    base_font = font_google("Manrope"),
+                    heading_font = font_google("Fraunces")),
+  header = tags$head(tags$style(custom_css)),
+  bg = INK, inverse = TRUE,
+
+  # --- Tab 1: DATA ---
+  nav_panel("Data", icon = icon("database"),
+    layout_columns(
+      col_widths = c(4, 8),
+      card(
+        card_header("Configure"),
+        numericInput("n_sets", "Number of sets:", value = 4, min = 2, max = 7, step = 1),
+        selectInput("case_handling", "Case handling:",
+                    choices = c("As is" = "asis", "UPPERCASE" = "upper", "lowercase" = "lower")),
+        checkboxInput("trim_ws", "Trim whitespace", TRUE),
+        hr(),
+        h6("Universe / background"),
+        radioButtons("universe_mode", NULL,
+                     choices = c("Auto: union of all sets" = "union",
+                                 "Specify size" = "size",
+                                 "Paste full universe" = "paste"),
+                     selected = "union"),
+        conditionalPanel("input.universe_mode == 'size'",
+          numericInput("universe_size_user", "Universe size:", value = 20000, min = 1)),
+        conditionalPanel("input.universe_mode == 'paste'",
+          textAreaInput("universe_text", "Universe elements (one per line):",
+                        height = "100px", placeholder = "e.g. all expressed genes")),
+        uiOutput("universe_warn"),
+        hr(),
+        h6("Load example"),
+        selectInput("example_choice", NULL,
+                    choices = c("— choose —" = "",
+                                setNames(names(EXAMPLES),
+                                          vapply(EXAMPLES, `[[`, character(1), "title")))),
+        actionButton("example_btn", "Load example", class = "btn-primary btn-sm"),
+        actionButton("clear_btn", "Clear all", class = "btn-outline-secondary btn-sm"),
+        hr(),
+        h6("Upload file"),
+        fileInput("upload", NULL,
+                  accept = c(".csv", ".tsv", ".txt", ".gmt", ".gmx", ".tab"),
+                  buttonLabel = "Browse…", placeholder = "csv / tsv / gmt"),
+        conditionalPanel("output.upload_ready == 'delim'",
+          radioButtons("upload_layout", "File layout:",
+                       choices = c("Wide: each column is a set" = "wide",
+                                   "Long: id + group columns" = "long")),
+          checkboxInput("upload_header", "First row is header", TRUE),
+          conditionalPanel("input.upload_layout == 'long'",
+            uiOutput("upload_col_pickers"))),
+        conditionalPanel("output.upload_ready != ''",
+          actionButton("apply_upload", "Apply upload", class = "btn-primary btn-sm")),
+        hr(),
+        h6("Session"),
+        downloadButton("dl_session", "Save session (JSON)", class = "btn-outline-secondary btn-sm"),
+        fileInput("upload_session", "Load session:", accept = ".json",
+                  buttonLabel = "Restore…", placeholder = "")
+      ),
+      card(
+        card_header(textOutput("data_card_header", inline = TRUE)),
+        uiOutput("set_inputs"),
+        uiOutput("data_summary")
+      )
+    )
+  ),
+
+  # --- Tab 2: VISUALIZE ---
+  nav_panel("Visualize", icon = icon("chart-pie"),
+    layout_sidebar(
+      sidebar = sidebar(width = 280, open = TRUE,
+        radioButtons("plot_type", "Plot type:",
+                     choices = c("Venn (≤ 5 sets)" = "venn",
+                                 "UpSet plot" = "upset",
+                                 "Pairwise heatmap" = "heatmap",
+                                 "Intersection bar chart" = "bar")),
+        conditionalPanel("input.plot_type == 'upset'",
+          numericInput("upset_top", "Top N intersections:", value = 30, min = 5, max = 100),
+          radioButtons("upset_sort", "Sort by:",
+                       choices = c("Count" = "count", "Degree (n sets)" = "degree"))),
+        conditionalPanel("input.plot_type == 'heatmap'",
+          radioButtons("heatmap_metric", "Similarity metric:",
+                       choices = c("Jaccard (intersection / union)" = "jaccard",
+                                   "Overlap (intersection / min)"  = "overlap",
+                                   "Sørensen–Dice (2·intersection / sum)" = "dice")),
+          radioButtons("heatmap_view", "Show:",
+                       choices = c("Similarity (0–1)" = "sim",
+                                   "Raw counts" = "count"))),
+        conditionalPanel("input.plot_type == 'bar'",
+          numericInput("bar_top", "Top N intersections:", value = 20, min = 5, max = 100)),
+        hr(),
+        h6("Export"),
+        div(class = "download-row",
+          downloadButton("dl_png", "PNG", class = "btn-sm btn-outline-secondary"),
+          downloadButton("dl_svg", "SVG", class = "btn-sm btn-outline-secondary"),
+          downloadButton("dl_pdf", "PDF", class = "btn-sm btn-outline-secondary"))
+      ),
+      plotOutput("main_plot", height = "680px"),
+      div(class = "small-muted",
+          textOutput("plot_caption"))
+    )
+  ),
+
+  # --- Tab 3: INTERSECTIONS ---
+  nav_panel("Intersections", icon = icon("layer-group"),
+    navset_card_tab(
+      nav_panel("Browse",
+        layout_columns(
+          col_widths = c(5, 7),
+          card(card_header("All intersections"),
+               div(style = "max-height:580px; overflow-y:auto;",
+                   uiOutput("int_list_full"))),
+          card(card_header("Selected — elements"),
+               uiOutput("sel_header_full"),
+               verbatimTextOutput("sel_elements_full"),
+               downloadButton("dl_sel_int", "Download elements (TSV)",
+                              class = "btn-sm btn-outline-secondary"))
+        )),
+      nav_panel("Custom query",
+        h6("Set algebra"),
+        p(class = "small-muted",
+          HTML("Operators: <code>&amp;</code> (AND), <code>|</code> (OR), <code>-</code> (set difference), <code>!</code> (NOT, vs universe). Parentheses are supported. Use the exact set names below.")),
+        textInput("query_text", NULL,
+                  value = "",
+                  placeholder = "e.g.  (Set1 & Set2) - Set3",
+                  width = "100%"),
+        actionButton("run_query", "Run query", class = "btn-primary btn-sm"),
+        hr(),
+        uiOutput("query_chips"),
+        verbatimTextOutput("query_output"),
+        downloadButton("dl_query", "Download elements (TSV)",
+                       class = "btn-sm btn-outline-secondary")
+      ),
+      nav_panel("Element search",
+        textInput("element_search", "Find an element across all sets:",
+                  placeholder = "e.g.  TP53", width = "60%"),
+        verbatimTextOutput("element_search_out")
+      ),
+      nav_panel("All intersections (table)",
+        downloadButton("dl_all_int", "Download full table (TSV)",
+                       class = "btn-sm btn-outline-secondary"),
+        br(), br(),
+        tableOutput("summary_tbl_full")
+      )
+    )
+  ),
+
+  # --- Tab 4: STATISTICS ---
+  nav_panel("Statistics", icon = icon("calculator"),
+    navset_card_tab(
+      nav_panel("Pairwise overlap",
+        h6("Fisher's exact test (one-sided, enrichment of overlap)"),
+        p(class = "small-muted",
+          "Each cell shows the number of shared elements. P-values reflect the probability of observing an overlap this large or larger by chance, given the universe size."),
+        uiOutput("pairwise_universe_note"),
+        plotOutput("pairwise_plot", height = "550px"),
+        hr(),
+        h6("Pairwise table"),
+        downloadButton("dl_pairwise", "Download (TSV)",
+                       class = "btn-sm btn-outline-secondary"),
+        br(), br(),
+        tableOutput("pairwise_tbl")
+      ),
+      nav_panel("Multi-set p-values",
+        h6("SuperExactTest-style hypergeometric p-values"),
+        p(class = "small-muted",
+          HTML("For every multi-way intersection, the probability of observing this many shared elements (or more) by chance, given the set sizes and universe. Method: Wang, Zhao &amp; Sherman, <i>Sci. Rep.</i> 2015. Adjustments via Benjamini–Hochberg.")),
+        uiOutput("multiset_universe_note"),
+        downloadButton("dl_multiset", "Download (TSV)",
+                       class = "btn-sm btn-outline-secondary"),
+        br(), br(),
+        tableOutput("multiset_tbl")
+      ),
+      nav_panel("Similarity matrices",
+        h6("Pairwise set-similarity coefficients"),
+        layout_columns(col_widths = c(4, 4, 4),
+          card(card_header("Jaccard"),  tableOutput("sim_jaccard"),
+               downloadButton("dl_jaccard", "TSV", class = "btn-sm btn-outline-secondary")),
+          card(card_header("Overlap"),  tableOutput("sim_overlap"),
+               downloadButton("dl_overlap", "TSV", class = "btn-sm btn-outline-secondary")),
+          card(card_header("Sørensen–Dice"), tableOutput("sim_dice"),
+               downloadButton("dl_dice", "TSV", class = "btn-sm btn-outline-secondary"))
+        )
+      )
+    )
+  ),
+
+  # --- Tab 5: REPRODUCE ---
+  nav_panel("Reproduce", icon = icon("code"),
+    layout_columns(col_widths = c(7, 5),
+      card(card_header("R code to reproduce this analysis"),
+           tags$pre(class = "repro", textOutput("repro_code", inline = FALSE)),
+           downloadButton("dl_code", "Download .R", class = "btn-sm btn-outline-secondary"),
+           actionButton("copy_code", "Copy to clipboard", class = "btn-sm btn-outline-secondary"),
+           tags$script(HTML("Shiny.addCustomMessageHandler('copy_code', function(t) { navigator.clipboard.writeText(t); });"))),
+      card(card_header("Methods text + citation"),
+           h6("Methods (paste into your manuscript):"),
+           verbatimTextOutput("methods_text"),
+           hr(),
+           h6("Suggested citations"),
+           HTML("<p><b>This tool:</b> Kobiowu S. <i>VennCompare</i> v2 (2026). <a href='https://somatogenomics.github.io/venn-compare/' target='_blank'>somatogenomics.github.io/venn-compare</a></p><p><b>Multi-set hypergeometric p-values:</b> Wang M, Zhao Y, Sherman BT. <i>Scientific Reports</i> 2015;5:16923. <a href='https://doi.org/10.1038/srep16923' target='_blank'>doi:10.1038/srep16923</a></p><p><b>UpSet visualization:</b> Lex A et al. <i>IEEE TVCG</i> 2014;20(12):1983–1992. <a href='https://doi.org/10.1109/TVCG.2014.2346248' target='_blank'>doi:10.1109/TVCG.2014.2346248</a></p>"))
+    )
+  ),
+
+  # --- Tab 6: ABOUT ---
+  nav_panel("About", icon = icon("circle-info"),
+    layout_columns(col_widths = c(8, 4),
+      card(card_header("Why VennCompare?"),
+           HTML("
+<p style='font-size:1.05rem; line-height:1.55'>
+VennCompare is a browser-only set comparison tool built for the working scientist. Unlike most online Venn tools, it scales beyond 4–6 sets, computes <b>statistical significance</b> for every overlap, accepts <b>file uploads</b>, and emits <b>reproducible R code</b> for every analysis.
+</p>
+<p>It is free, open-source, and runs entirely on your machine — your data never leaves the browser. Ideal for gene lists, pathway overlaps, survey responses, customer cohorts, document comparisons, ML model agreement, or any task involving sets of identifiers.
+</p>"),
+           h6("Compared to existing tools"),
+           HTML("<table class='compare-tbl' style='width:100%'>
+<thead><tr><th>Capability</th><th>Venny</th><th>InteractiVenn</th><th>jvenn</th><th>DeepVenn</th><th>VennCompare</th></tr></thead>
+<tbody>
+<tr><td>Max sets</td><td>4</td><td>6</td><td>6</td><td>6</td><td><b>7</b></td></tr>
+<tr><td>Statistical p-values</td><td>—</td><td>—</td><td>—</td><td>—</td><td><b>✓</b></td></tr>
+<tr><td>Background universe</td><td>—</td><td>—</td><td>—</td><td>—</td><td><b>✓</b></td></tr>
+<tr><td>UpSet plot</td><td>—</td><td>—</td><td>—</td><td>—</td><td><b>✓</b></td></tr>
+<tr><td>Pairwise heatmap</td><td>—</td><td>—</td><td>—</td><td>—</td><td><b>✓</b></td></tr>
+<tr><td>File upload</td><td>—</td><td>partial</td><td>✓</td><td>—</td><td><b>✓</b></td></tr>
+<tr><td>Custom set queries</td><td>—</td><td>—</td><td>—</td><td>—</td><td><b>✓</b></td></tr>
+<tr><td>R code export</td><td>—</td><td>—</td><td>—</td><td>—</td><td><b>✓</b></td></tr>
+<tr><td>Vector (SVG/PDF) export</td><td>—</td><td>partial</td><td>✓</td><td>—</td><td><b>✓</b></td></tr>
+<tr><td>Runs offline</td><td>—</td><td>—</td><td>—</td><td>—</td><td><b>✓</b></td></tr>
+</tbody></table>")),
+      card(card_header("Quick reference"),
+           h6("Statistical assumptions"),
+           HTML("<ul class='small-muted' style='padding-left:18px; line-height:1.6'>
+<li>Sets are independent, simple random samples from the universe.</li>
+<li>Universe size is fixed and known (you control it under <i>Data → Universe</i>).</li>
+<li>Pairwise = Fisher's exact, one-sided (greater).</li>
+<li>Multi-set = exact hypergeometric (Wang et al. 2015).</li>
+<li>BH adjustment applied across all intersections of degree ≥ 2.</li>
+</ul>"),
+           h6("Tips"),
+           HTML("<ul class='small-muted' style='padding-left:18px; line-height:1.6'>
+<li>Default universe is the union of inputs — typically too small. Override with the actual background.</li>
+<li>For genomics: use the universe of expressed/measured genes (e.g. ~15&thinsp;000–25&thinsp;000).</li>
+<li>For ML / clustering / survey overlap: use the full sample frame.</li>
+<li>Tab into <i>Reproduce</i> to copy R code that recreates the analysis without VennCompare.</li>
+</ul>"),
+           hr(),
+           h6("Cite"),
+           HTML("<p class='small-muted'>Kobiowu S. VennCompare v2 (2026). <br><a href='https://somatogenomics.github.io/venn-compare/' target='_blank'>somatogenomics.github.io/venn-compare</a></p>"),
+           h6("Source"),
+           HTML(sprintf("<p class='small-muted'><a href='https://github.com/Somatogenomics/venn-compare' target='_blank'>github.com/Somatogenomics/venn-compare</a> &middot; v%s</p>", VC_VERSION))
+      )
+    )
+  )
 )
+
+# =====================================================================
+# Server
+# =====================================================================
 
 server <- function(input, output, session) {
 
-rv <- reactiveValues(sel_int = NULL)
+  rv <- reactiveValues(
+    sel_int = NULL, query_result = NULL, uploaded_sets = NULL,
+    upload_df_preview = NULL, upload_ext = NULL
+  )
 
-output$set_inputs <- renderUI({
-  n <- input$n_sets
-  lapply(1:n, function(i) {
-    div(style = "margin-bottom:8px;",
-        div(style = "display:flex;align-items:center;gap:8px;margin-bottom:3px;",
-            textInput(paste0("name_", i), NULL, value = paste0("Set", i), width = "100px"),
-            span(style = "background:#007bff;color:white;padding:2px 8px;border-radius:10px;font-size:11px;",
-                 textOutput(paste0("count_", i), inline = TRUE))
-        ),
-        textAreaInput(paste0("set_", i), NULL, placeholder = "One item per line", 
-                      height = "70px", width = "100%"))
+  # ---- Render the per-set inputs ----
+  output$set_inputs <- renderUI({
+    n <- input$n_sets
+    lapply(seq_len(n), function(i) {
+      div(style = "margin-bottom:9px;",
+          div(style = "display:flex; align-items:center; gap:8px; margin-bottom:3px;",
+              textInput(paste0("name_", i), NULL,
+                        value = paste0("Set", i), width = "150px"),
+              span(class = "badge-count",
+                   textOutput(paste0("count_", i), inline = TRUE)),
+              tags$span(style = sprintf("display:inline-block; width:14px; height:14px; border-radius:3px; background:%s; margin-left:auto;", PALETTE[i]))
+          ),
+          textAreaInput(paste0("set_", i), NULL,
+                        placeholder = "One element per line, or comma/semicolon/tab-separated",
+                        height = "75px", width = "100%"))
+    })
   })
-})
 
-# Update counts for each set
-observe({
-  req(input$n_sets)
-  sets <- get_sets()
-  for (i in 1:input$n_sets) {
-    local({
-      idx <- i
-      nm <- input[[paste0("name_", idx)]]
-      cnt <- if (!is.null(nm) && nm %in% names(sets)) length(sets[[nm]]) else 0
-      output[[paste0("count_", idx)]] <- renderText({ paste0(cnt, " items") })
-    })
-  }
-})
-
-get_sets <- reactive({
-  req(input$n_sets)
-  sets <- list()
-  for (i in 1:input$n_sets) {
-    txt <- input[[paste0("set_", i)]]
-    nm <- input[[paste0("name_", i)]]
-    if (!is.null(txt) && nchar(txt) > 0) {
-      els <- strsplit(txt, "\n")[[1]]
-      if (input$trim_ws) els <- trimws(els)
-      els <- els[els != ""]
-      if (input$case_handling == "upper") els <- toupper(els)
-      if (input$case_handling == "lower") els <- tolower(els)
-      els <- unique(els)
-      if (length(els) > 0) {
-        name <- if (!is.null(nm) && nchar(nm) > 0) nm else paste0("Set", i)
-        sets[[name]] <- els
+  # ---- Compute current sets ----
+  get_sets <- reactive({
+    req(input$n_sets)
+    sets <- list()
+    for (i in seq_len(input$n_sets)) {
+      txt <- input[[paste0("set_", i)]]
+      nm <- input[[paste0("name_", i)]]
+      els <- parse_set_text(txt, input$case_handling, input$trim_ws)
+      if (length(els)) {
+        nm <- if (!is.null(nm) && nchar(nm)) nm else paste0("Set", i)
+        sets[[nm]] <- els
       }
     }
-  }
-  sets
-})
+    sets
+  })
 
-observeEvent(input$example_btn, {
-  ex <- list(
-    c("BRCA1","TP53","EGFR","KRAS","MYC","CDK4","RB1","PTEN"),
-    c("TP53","EGFR","MYC","CDK4","VEGFA","HIF1A","NOTCH1"),
-    c("BRCA1","TP53","MYC","PTEN","AKT1","PIK3CA","MTOR"),
-    c("EGFR","KRAS","MYC","BRAF","VEGFA","HIF1A","AKT1")
-  )
-  for (i in 1:min(input$n_sets, 4)) {
-    updateTextAreaInput(session, paste0("set_", i), value = paste(ex[[i]], collapse = "\n"))
-    updateTextInput(session, paste0("name_", i), value = paste0("GeneSet", i))
-  }
-})
+  # ---- Per-set live counts ----
+  observe({
+    req(input$n_sets)
+    sets <- get_sets()
+    for (i in seq_len(input$n_sets)) {
+      local({
+        idx <- i
+        nm <- input[[paste0("name_", idx)]]
+        cnt <- if (!is.null(nm) && nm %in% names(sets)) length(sets[[nm]]) else 0
+        output[[paste0("count_", idx)]] <- renderText(paste0(cnt))
+      })
+    }
+  })
 
-observeEvent(input$clear_btn, {
-  for (i in 1:7) {
-    updateTextAreaInput(session, paste0("set_", i), value = "")
-    updateTextInput(session, paste0("name_", i), value = paste0("Set", i))
-  }
-})
-
-output$main_plot <- renderPlot({
-  sets <- get_sets()
-  req(length(sets) >= 2)
-  n <- length(sets)
-  cols <- c("#E41A1C","#377EB8","#4DAF4A","#984EA3","#FF7F00","#A65628","#F781BF")[1:n]
-  
-  if (n <= 4) {
-    par(mar = c(1,1,2,1))
-    plot(0, 0, type = "n", xlim = c(-4,4), ylim = c(-4,4), asp = 1, axes = FALSE, xlab = "", ylab = "")
-    title(paste("Comparison of", n, "Sets"), cex.main = 1.3)
-    
-    if (n == 2) {
-      centers <- list(c(-1,0), c(1,0)); r <- 1.8
-      lblpos <- list(c(-2.5,2), c(2.5,2))
-      # Region positions for 2 sets: A only, A&B, B only
-      regionpos <- list(c(-1.8,0), c(0,0), c(1.8,0))
-    } else if (n == 3) {
-      centers <- list(c(-1,0.6), c(1,0.6), c(0,-1)); r <- 1.6
-      lblpos <- list(c(-2.5,2.2), c(2.5,2.2), c(0,-3))
-      # Region positions for 3 sets
-      regionpos <- list(
-        c(-1.6,0.9),   # A only
-        c(1.6,0.9),    # B only
-        c(0,-1.7),     # C only
-        c(0,1.1),      # A&B only
-        c(-0.9,-0.3),  # A&C only
-        c(0.9,-0.3),   # B&C only
-        c(0,0)         # A&B&C
-      )
+  # ---- Universe ----
+  get_universe <- reactive({
+    sets <- get_sets()
+    mode <- input$universe_mode
+    if (mode == "union") {
+      list(elements = sort(unique(unlist(sets))),
+           size = length(unique(unlist(sets))),
+           explicit = FALSE)
+    } else if (mode == "size") {
+      n <- input$universe_size_user
+      union_n <- length(unique(unlist(sets)))
+      list(elements = NULL, size = max(n, union_n, na.rm = TRUE),
+           explicit = TRUE)
     } else {
-      centers <- list(c(-1.2,0.8), c(1.2,0.8), c(-0.6,-0.8), c(0.6,-0.8)); r <- 1.5
-      lblpos <- list(c(-2.8,2.2), c(2.8,2.2), c(-2.2,-2.5), c(2.2,-2.5))
-      # Region positions for 4 sets (approximate)
-      regionpos <- list(
-        c(-1.8,1.2),   # A only
-        c(1.8,1.2),    # B only
-        c(-1.3,-1.5),  # C only
-        c(1.3,-1.5),   # D only
-        c(0,1.4),      # A&B
-        c(-1.4,0),     # A&C
-        c(-0.4,0.6),   # A&D
-        c(0.4,0.6),    # B&C
-        c(1.4,0),      # B&D
-        c(0,-1.1),     # C&D
-        c(-0.6,0.3),   # A&B&C
-        c(0.6,0.3),    # A&B&D
-        c(-0.3,-0.4),  # A&C&D
-        c(0.3,-0.4),   # B&C&D
-        c(0,0)         # A&B&C&D
-      )
+      els <- parse_set_text(input$universe_text, input$case_handling, input$trim_ws)
+      union_els <- unique(unlist(sets))
+      els <- unique(c(els, union_els))
+      list(elements = els, size = length(els), explicit = TRUE)
     }
-    
-    theta <- seq(0, 2*pi, length.out = 100)
-    for (i in 1:n) {
-      x <- centers[[i]][1] + r * cos(theta)
-      y <- centers[[i]][2] + r * sin(theta)
-      polygon(x, y, border = cols[i], col = adjustcolor(cols[i], 0.15), lwd = 2.5)
-      text(lblpos[[i]][1], lblpos[[i]][2], names(sets)[i], col = cols[i], font = 2, cex = 1.2)
-    }
-    
-    # Calculate and display counts for each region
-    ints <- compute_intersections(sets)
-    
-    if (n == 2) {
-      A <- sets[[1]]; B <- sets[[2]]
-      counts <- c(
-        length(setdiff(A, B)),           # A only
-        length(intersect(A, B)),         # A&B
-        length(setdiff(B, A))            # B only
-      )
-      for (i in 1:3) {
-        text(regionpos[[i]][1], regionpos[[i]][2], counts[i], cex = 1.3, font = 2)
-      }
-    } else if (n == 3) {
-      A <- sets[[1]]; B <- sets[[2]]; C <- sets[[3]]
-      ABC <- Reduce(intersect, sets)
-      AB <- setdiff(intersect(A, B), C)
-      AC <- setdiff(intersect(A, C), B)
-      BC <- setdiff(intersect(B, C), A)
-      Aonly <- setdiff(setdiff(A, B), C)
-      Bonly <- setdiff(setdiff(B, A), C)
-      Conly <- setdiff(setdiff(C, A), B)
-      
-      counts <- c(length(Aonly), length(Bonly), length(Conly),
-                  length(AB), length(AC), length(BC), length(ABC))
-      for (i in 1:7) {
-        text(regionpos[[i]][1], regionpos[[i]][2], counts[i], cex = 1.1, font = 2)
-      }
-    } else if (n == 4) {
-      A <- sets[[1]]; B <- sets[[2]]; C <- sets[[3]]; D <- sets[[4]]
-      
-      # All 15 regions for 4 sets
-      ABCD <- Reduce(intersect, sets)
-      ABC <- setdiff(Reduce(intersect, list(A,B,C)), D)
-      ABD <- setdiff(Reduce(intersect, list(A,B,D)), C)
-      ACD <- setdiff(Reduce(intersect, list(A,C,D)), B)
-      BCD <- setdiff(Reduce(intersect, list(B,C,D)), A)
-      AB <- setdiff(setdiff(intersect(A,B), C), D)
-      AC <- setdiff(setdiff(intersect(A,C), B), D)
-      AD <- setdiff(setdiff(intersect(A,D), B), C)
-      BC <- setdiff(setdiff(intersect(B,C), A), D)
-      BD <- setdiff(setdiff(intersect(B,D), A), C)
-      CD <- setdiff(setdiff(intersect(C,D), A), B)
-      Aonly <- setdiff(setdiff(setdiff(A,B),C),D)
-      Bonly <- setdiff(setdiff(setdiff(B,A),C),D)
-      Conly <- setdiff(setdiff(setdiff(C,A),B),D)
-      Donly <- setdiff(setdiff(setdiff(D,A),B),C)
-      
-      counts <- c(length(Aonly), length(Bonly), length(Conly), length(Donly),
-                  length(AB), length(AC), length(AD), length(BC), length(BD), length(CD),
-                  length(ABC), length(ABD), length(ACD), length(BCD), length(ABCD))
-      for (i in 1:15) {
-        if (counts[i] > 0) {
-          text(regionpos[[i]][1], regionpos[[i]][2], counts[i], cex = 0.9, font = 2)
+  })
+
+  output$universe_warn <- renderUI({
+    sets <- get_sets()
+    if (!length(sets)) return(NULL)
+    u <- get_universe()
+    if (!u$explicit) {
+      div(class = "universe-warn",
+          icon("triangle-exclamation"),
+          " Using the union (",  u$size, " elements) as universe. ",
+          "For meaningful enrichment p-values, set the actual background — e.g. ~20,000 for a typical genome-wide gene list.")
+    } else NULL
+  })
+
+  output$data_card_header <- renderText({
+    sets <- get_sets()
+    if (!length(sets)) "Define your sets" else
+      sprintf("%d sets — %d unique elements (union)", length(sets), length(unique(unlist(sets))))
+  })
+
+  output$data_summary <- renderUI({
+    sets <- get_sets()
+    if (!length(sets)) return(div(class = "small-muted",
+      "Paste your data on the right, upload a file, or load an example."))
+    u <- get_universe()
+    div(style = "margin-top:12px;",
+        span(class = "stat-pill", paste(length(sets), "sets")),
+        span(class = "stat-pill", paste(length(unique(unlist(sets))), "elements")),
+        span(class = "stat-pill", paste("universe:", u$size)),
+        if (length(sets) >= 2) {
+          common <- length(Reduce(intersect, sets))
+          span(class = "stat-pill", paste("all-set common:", common))
         }
-      }
+    )
+  })
+
+  # ---- Examples ----
+  observeEvent(input$example_btn, {
+    req(nzchar(input$example_choice))
+    ex <- EXAMPLES[[input$example_choice]]
+    n <- length(ex$sets)
+    updateNumericInput(session, "n_sets", value = n)
+    for (i in seq_len(n)) {
+      updateTextAreaInput(session, paste0("set_", i),
+                          value = paste(ex$sets[[i]], collapse = "\n"))
+      updateTextInput(session, paste0("name_", i),
+                      value = names(ex$sets)[i])
     }
-    
-  } else {
-    ints <- compute_intersections(sets)
-    if (is.null(ints)) return()
-    counts <- sapply(ints, function(x) x$count)
-    ints <- ints[order(-counts)]
-    if (length(ints) > 15) ints <- ints[1:15]
-    
-    par(mar = c(5,10,3,2))
-    barplot(rev(sapply(ints, function(x) x$count)), 
-            names.arg = rev(names(ints)), horiz = TRUE, las = 1,
-            col = "#4a4a4a", border = NA, xlab = "Count",
-            main = paste("Top Intersections (", n, " sets)"))
-  }
-})
+  })
 
-ints_data <- reactive({
-  sets <- get_sets()
-  req(length(sets) >= 2)
-  compute_intersections(sets)
-})
+  observeEvent(input$clear_btn, {
+    for (i in 1:7) {
+      updateTextAreaInput(session, paste0("set_", i), value = "")
+      updateTextInput(session, paste0("name_", i), value = paste0("Set", i))
+    }
+    updateTextAreaInput(session, "universe_text", value = "")
+    rv$sel_int <- NULL; rv$query_result <- NULL
+  })
 
-output$int_list <- renderUI({
-  ints <- ints_data()
-  req(length(ints) > 0)
-  ints <- ints[order(-sapply(ints, function(x) x$count))]
-  tagList(lapply(names(ints), function(nm) {
-    actionButton(paste0("btn_", gsub("[^a-zA-Z0-9]", "_", nm)),
-                 paste0(ints[[nm]]$count, " - ", nm),
-                 class = "btn btn-light btn-sm",
-                 style = "width:100%;text-align:left;margin-bottom:3px;font-size:12px;")
-  }))
-})
+  # ---- Upload handling ----
+  output$upload_ready <- reactive({
+    f <- input$upload
+    if (is.null(f)) return("")
+    ext <- tolower(tools::file_ext(f$name))
+    rv$upload_ext <- ext
+    if (ext %in% c("gmt", "gmx")) "gmt" else "delim"
+  })
+  outputOptions(output, "upload_ready", suspendWhenHidden = FALSE)
 
-observe({
-  ints <- ints_data()
-  req(length(ints) > 0)
-  for (nm in names(ints)) {
-    local({
-      int_nm <- nm
-      bid <- paste0("btn_", gsub("[^a-zA-Z0-9]", "_", int_nm))
-      observeEvent(input[[bid]], { rv$sel_int <- int_nm }, ignoreInit = TRUE)
-    })
-  }
-})
+  output$upload_col_pickers <- renderUI({
+    req(input$upload, input$upload_layout == "long")
+    f <- input$upload
+    df <- tryCatch(
+      read.table(f$datapath, header = input$upload_header, sep = "\t",
+                 quote = "\"", stringsAsFactors = FALSE,
+                 nrows = 50, fill = TRUE),
+      error = function(e) NULL)
+    if (is.null(df) || ncol(df) < 2) {
+      df <- tryCatch(
+        read.table(f$datapath, header = input$upload_header, sep = ",",
+                   quote = "\"", stringsAsFactors = FALSE,
+                   nrows = 50, fill = TRUE),
+        error = function(e) NULL)
+    }
+    if (is.null(df)) return(div(class = "small-muted", "Cannot preview file."))
+    cols <- names(df)
+    tagList(
+      selectInput("id_col", "Element ID column:", choices = cols),
+      selectInput("set_col", "Set / group column:", choices = cols, selected = cols[2])
+    )
+  })
 
-output$sel_header <- renderUI({
-  req(rv$sel_int)
-  ints <- ints_data()
-  req(rv$sel_int %in% names(ints))
-  div(style = "background:#e8f4f8;padding:8px;border-radius:4px;margin-bottom:8px;border-left:3px solid #3498db;",
-      strong(rv$sel_int), br(),
-      span(style = "color:#666;", paste(ints[[rv$sel_int]]$count, "elements")))
-})
+  observeEvent(input$apply_upload, {
+    req(input$upload)
+    f <- input$upload
+    ext <- tolower(tools::file_ext(f$name))
+    layout <- if (!is.null(input$upload_layout)) input$upload_layout else "wide"
+    sets <- tryCatch(
+      parse_uploaded_file(
+        f$datapath, ext, input$case_handling, input$trim_ws,
+        sep = "auto",
+        id_col  = if (layout == "long") input$id_col  else NULL,
+        set_col = if (layout == "long") input$set_col else NULL,
+        has_header = if (!is.null(input$upload_header)) input$upload_header else TRUE
+      ),
+      error = function(e) NULL
+    )
+    if (is.null(sets) || !length(sets)) {
+      showNotification("Upload could not be parsed.", type = "error")
+      return()
+    }
+    n <- min(length(sets), 7)
+    updateNumericInput(session, "n_sets", value = n)
+    for (i in seq_len(n)) {
+      updateTextAreaInput(session, paste0("set_", i),
+                          value = paste(sets[[i]], collapse = "\n"))
+      updateTextInput(session, paste0("name_", i),
+                      value = names(sets)[i])
+    }
+    showNotification(sprintf("Loaded %d sets from %s.", n, f$name), type = "message")
+  })
 
-output$sel_elements <- renderText({
-  req(rv$sel_int)
-  ints <- ints_data()
-  req(rv$sel_int %in% names(ints))
-  paste(ints[[rv$sel_int]]$elements, collapse = "\n")
-})
-
-output$summary_tbl <- renderTable({
-  ints <- ints_data()
-  req(length(ints) > 0)
-  df <- data.frame(
-    Intersection = names(ints),
-    Count = sapply(ints, function(x) x$count),
-    Elements = sapply(ints, function(x) paste(head(x$elements, 5), collapse = ", "))
+  # ---- Session save / load ----
+  output$dl_session <- downloadHandler(
+    filename = function() sprintf("venncompare_session_%s.json",
+                                    format(Sys.time(), "%Y%m%d_%H%M%S")),
+    content = function(file) {
+      sets <- get_sets()
+      payload <- list(
+        version = VC_VERSION,
+        n_sets  = input$n_sets,
+        case_handling = input$case_handling,
+        trim_ws = input$trim_ws,
+        universe_mode = input$universe_mode,
+        universe_size_user = input$universe_size_user,
+        universe_text = input$universe_text,
+        sets = lapply(seq_len(input$n_sets), function(i) {
+          list(name = input[[paste0("name_", i)]],
+               text = input[[paste0("set_", i)]])
+        })
+      )
+      writeLines(jsonlite_toJSON(payload), file)
+    }
   )
-  df[order(-df$Count), ]
-}, striped = TRUE, hover = TRUE)
 
-output$union_out <- renderText({
-  sets <- get_sets()
-  req(length(sets) >= 2)
-  u <- sort(unique(unlist(sets)))
-  paste0("Total: ", length(u), "\n\n", paste(u, collapse = "\n"))
-})
+  observeEvent(input$upload_session, {
+    f <- input$upload_session; req(f)
+    txt <- paste(readLines(f$datapath, warn = FALSE), collapse = "\n")
+    payload <- tryCatch(jsonlite_fromJSON(txt), error = function(e) NULL)
+    if (is.null(payload)) {
+      showNotification("Invalid session file.", type = "error"); return() }
+    updateNumericInput(session, "n_sets", value = payload$n_sets)
+    updateSelectInput(session, "case_handling", selected = payload$case_handling)
+    updateCheckboxInput(session, "trim_ws", value = payload$trim_ws)
+    updateRadioButtons(session, "universe_mode", selected = payload$universe_mode)
+    if (!is.null(payload$universe_size_user))
+      updateNumericInput(session, "universe_size_user", value = payload$universe_size_user)
+    if (!is.null(payload$universe_text))
+      updateTextAreaInput(session, "universe_text", value = payload$universe_text)
+    for (i in seq_along(payload$sets)) {
+      updateTextInput(session, paste0("name_", i), value = payload$sets[[i]]$name)
+      updateTextAreaInput(session, paste0("set_", i), value = payload$sets[[i]]$text)
+    }
+    showNotification("Session restored.", type = "message")
+  })
 
-output$common_out <- renderText({
-  sets <- get_sets()
-  req(length(sets) >= 2)
-  common <- Reduce(intersect, sets)
-  if (length(common) > 0) {
-    paste0("Total: ", length(common), "\n\n", paste(sort(common), collapse = "\n"))
-  } else {
-    "No common elements"
+  # ---- Plotting ----
+  make_plot <- function() {
+    sets <- get_sets()
+    if (length(sets) < 2) {
+      plot.new(); text(0.5, 0.5, "Add at least 2 sets in the Data tab",
+                        cex = 1.1, col = INK2); return(invisible())
+    }
+    switch(input$plot_type,
+      venn = {
+        if (length(sets) > 5) {
+          plot.new(); text(0.5, 0.5,
+            "Venn supports \u2264 5 sets. Switch to UpSet for larger comparisons.",
+            cex = 1.05, col = INK2)
+        } else draw_venn(sets, PALETTE)
+      },
+      upset = draw_upset(sets, top_n = input$upset_top,
+                          sort_by = input$upset_sort, palette = PALETTE,
+                          highlight = rv$sel_int),
+      heatmap = {
+        if (input$heatmap_view == "sim") {
+          M <- pairwise_similarity(sets, input$heatmap_metric)
+          ttl <- switch(input$heatmap_metric,
+                        jaccard = "Jaccard similarity",
+                        overlap = "Overlap coefficient",
+                        dice    = "S\u00f8rensen\u2013Dice")
+          draw_sim_heatmap(M, title = ttl, fmt = "%.2f", zlim = c(0, 1))
+        } else {
+          M <- pairwise_counts(sets)
+          draw_sim_heatmap(M, title = "Pairwise overlap (counts)",
+                            fmt = "%d", zlim = NULL)
+        }
+      },
+      bar = draw_intersection_bar(sets, top_n = input$bar_top, palette = PALETTE)
+    )
   }
-})
 
+  output$main_plot <- renderPlot({ make_plot() }, res = 110)
+
+  output$plot_caption <- renderText({
+    sets <- get_sets()
+    if (length(sets) < 2) return("")
+    u <- get_universe()
+    sprintf("%d sets · universe = %d · plot type: %s · %s",
+            length(sets), u$size, input$plot_type,
+            format(Sys.time(), "%Y-%m-%d %H:%M"))
+  })
+
+  # ---- Plot downloads ----
+  output$dl_png <- downloadHandler(
+    filename = function() "venncompare_plot.png",
+    content = function(file) {
+      png(file, width = 1600, height = 1100, res = 180, bg = "white")
+      make_plot()
+      dev.off()
+    })
+  output$dl_svg <- downloadHandler(
+    filename = function() "venncompare_plot.svg",
+    content = function(file) {
+      svg(file, width = 11, height = 7.5)
+      make_plot()
+      dev.off()
+    })
+  output$dl_pdf <- downloadHandler(
+    filename = function() "venncompare_plot.pdf",
+    content = function(file) {
+      pdf(file, width = 11, height = 7.5)
+      make_plot()
+      dev.off()
+    })
+
+  # ---- Intersections (full-tab) ----
+  ints_data <- reactive({
+    sets <- get_sets()
+    req(length(sets) >= 2)
+    compute_exclusive_intersections(sets)
+  })
+
+  output$int_list_full <- renderUI({
+    ints <- ints_data(); req(length(ints) > 0)
+    ints <- ints[order(-sapply(ints, function(x) x$count))]
+    tagList(lapply(names(ints), function(nm) {
+      bid <- paste0("btnf_", gsub("[^a-zA-Z0-9]", "_", nm))
+      div(class = "int-row", id = bid,
+          onclick = sprintf("Shiny.setInputValue('intf_click', '%s', {priority:'event'})",
+                            gsub("'", "\\\\'", nm)),
+          span(class = "ir-count", ints[[nm]]$count),
+          span(nm))
+    }))
+  })
+
+  observeEvent(input$intf_click, { rv$sel_int <- input$intf_click })
+
+  output$sel_header_full <- renderUI({
+    req(rv$sel_int)
+    ints <- ints_data(); req(rv$sel_int %in% names(ints))
+    div(style = "background:#f4ede4; padding:9px 12px; border-radius:5px; margin-bottom:9px; border-left:3px solid #c66b3d;",
+        strong(rv$sel_int), br(),
+        span(class = "small-muted",
+             paste(ints[[rv$sel_int]]$count, "elements ·",
+                   ints[[rv$sel_int]]$n_sets, "sets")))
+  })
+
+  output$sel_elements_full <- renderText({
+    req(rv$sel_int)
+    ints <- ints_data(); req(rv$sel_int %in% names(ints))
+    paste(ints[[rv$sel_int]]$elements, collapse = "\n")
+  })
+
+  output$dl_sel_int <- downloadHandler(
+    filename = function() sprintf("intersection_%s.tsv",
+                                    gsub("[^a-zA-Z0-9]", "_", rv$sel_int %||% "selection")),
+    content = function(file) {
+      ints <- ints_data(); req(rv$sel_int %in% names(ints))
+      writeLines(c("element", ints[[rv$sel_int]]$elements), file)
+    })
+  `%||%` <- function(a, b) if (is.null(a)) b else a
+
+  # ---- Custom set-algebra query ----
+  observeEvent(input$run_query, {
+    sets <- get_sets()
+    if (length(sets) < 1) return()
+    u <- get_universe()
+    universe_els <- if (!is.null(u$elements)) u$elements else
+      sort(unique(unlist(sets)))
+    res <- parse_set_query(input$query_text, sets, universe_els)
+    rv$query_result <- res
+  })
+
+  output$query_chips <- renderUI({
+    sets <- get_sets()
+    if (!length(sets)) return(NULL)
+    div(class = "small-muted", style = "margin-bottom:9px;",
+        "Available set names: ",
+        lapply(names(sets), function(nm)
+          tags$code(style = "margin-right:5px; cursor:pointer;",
+                    onclick = sprintf("var ti=document.getElementById('query_text'); ti.value+=ti.value?' & %s':'%s'; ti.dispatchEvent(new Event('input',{bubbles:true}))",
+                                       nm, nm),
+                    nm)))
+  })
+
+  output$query_output <- renderText({
+    res <- rv$query_result
+    if (is.null(res)) return("Build a query above and click Run.")
+    if (!is.null(res$error)) return(paste("⚠", res$error))
+    sprintf("Result: %d elements\n\n%s", res$count,
+            paste(res$elements, collapse = "\n"))
+  })
+
+  output$dl_query <- downloadHandler(
+    filename = function() "custom_query.tsv",
+    content = function(file) {
+      res <- rv$query_result
+      if (is.null(res) || !is.null(res$error)) writeLines("", file) else
+        writeLines(c("element", res$elements), file)
+    })
+
+  # ---- Element search ----
+  output$element_search_out <- renderText({
+    req(nzchar(input$element_search))
+    sets <- get_sets(); if (!length(sets)) return("No sets loaded.")
+    needle <- input$element_search
+    cmp <- if (input$case_handling == "lower") tolower else
+           if (input$case_handling == "upper") toupper else identity
+    needle <- cmp(needle)
+    hits <- vapply(sets, function(s) needle %in% cmp(s), logical(1))
+    if (!any(hits)) return(sprintf("'%s' not found in any set.", input$element_search))
+    paste0(sprintf("'%s' is in %d / %d sets:\n  ",
+                   input$element_search, sum(hits), length(sets)),
+           paste(names(sets)[hits], collapse = ", "))
+  })
+
+  # ---- All-intersections summary table ----
+  output$summary_tbl_full <- renderTable({
+    ints <- ints_data(); req(length(ints) > 0)
+    df <- data.frame(
+      Intersection = names(ints),
+      Degree   = vapply(ints, function(x) x$n_sets, integer(1)),
+      Count    = vapply(ints, function(x) x$count,  integer(1)),
+      Preview  = vapply(ints, function(x)
+                          paste(head(x$elements, 5), collapse = ", "),
+                        character(1)),
+      stringsAsFactors = FALSE
+    )
+    df[order(-df$Count), ]
+  }, striped = TRUE, hover = TRUE, width = "100%")
+
+  output$dl_all_int <- downloadHandler(
+    filename = function() "all_intersections.tsv",
+    content = function(file) {
+      ints <- ints_data(); req(length(ints) > 0)
+      lines <- c("intersection\tdegree\tcount\telements")
+      for (nm in names(ints))
+        lines <- c(lines, sprintf("%s\t%d\t%d\t%s",
+                                   nm, ints[[nm]]$n_sets, ints[[nm]]$count,
+                                   paste(ints[[nm]]$elements, collapse = ",")))
+      writeLines(lines, file)
+    })
+
+  # ---- Statistics: pairwise ----
+  pairwise_data <- reactive({
+    sets <- get_sets(); req(length(sets) >= 2)
+    u <- get_universe()
+    P <- pairwise_fisher(sets, u$size)
+    C <- pairwise_counts(sets)
+    list(P = P, C = C, universe = u$size, sets = sets)
+  })
+
+  output$pairwise_universe_note <- renderUI({
+    u <- get_universe()
+    div(class = "stat-pill", paste("universe size:", u$size))
+  })
+
+  output$pairwise_plot <- renderPlot({
+    pd <- pairwise_data()
+    P <- pd$P
+    # show -log10(p) as the heatmap
+    L <- -log10(P)
+    L[!is.finite(L)] <- 0
+    diag(L) <- 0
+    draw_sim_heatmap(L, title = "−log10(P) for pairwise overlap (Fisher's exact)",
+                      fmt = "%.1f", zlim = c(0, max(L, 5, na.rm = TRUE)))
+  }, res = 110)
+
+  output$pairwise_tbl <- renderTable({
+    pd <- pairwise_data()
+    sets <- pd$sets; nm <- names(sets); n <- length(sets)
+    # Walk pairs in fixed order (i, j with i<j) to keep BH adjustment aligned
+    pairs <- list(); ps <- numeric(0)
+    for (i in seq_len(n - 1)) for (j in (i + 1):n) {
+      ps <- c(ps, pd$P[i, j])
+      pairs[[length(pairs) + 1]] <- c(i, j)
+    }
+    fdrs <- bh_adjust(ps)
+    rows <- vector("list", length(pairs))
+    for (k in seq_along(pairs)) {
+      i <- pairs[[k]][1]; j <- pairs[[k]][2]
+      ab <- pd$C[i, j]
+      ja <- ab / length(union(sets[[i]], sets[[j]]))
+      rows[[k]] <- data.frame(
+        A = nm[i], B = nm[j],
+        `|A|` = length(sets[[i]]),
+        `|B|` = length(sets[[j]]),
+        `|A\u2229B|` = ab,
+        Jaccard = round(ja, 3),
+        P   = format.pval(pd$P[i, j], digits = 3, eps = 1e-300),
+        FDR = format.pval(fdrs[k],     digits = 3, eps = 1e-300),
+        stringsAsFactors = FALSE, check.names = FALSE)
+    }
+    do.call(rbind, rows)
+  }, striped = TRUE, hover = TRUE, width = "100%")
+
+  output$dl_pairwise <- downloadHandler(
+    filename = function() "pairwise_overlap.tsv",
+    content = function(file) {
+      pd <- pairwise_data()
+      sets <- pd$sets; nm <- names(sets); n <- length(sets)
+      lines <- c("A\tB\tsize_A\tsize_B\toverlap\tjaccard\tp_value\tfdr_BH")
+      ps <- pd$P[upper.tri(pd$P)]; fdrs <- bh_adjust(ps); k <- 0
+      for (i in seq_len(n - 1)) for (j in (i + 1):n) {
+        k <- k + 1
+        ab <- pd$C[i, j]
+        ja <- ab / length(union(sets[[i]], sets[[j]]))
+        lines <- c(lines, sprintf("%s\t%s\t%d\t%d\t%d\t%.4f\t%.3e\t%.3e",
+                                   nm[i], nm[j], length(sets[[i]]),
+                                   length(sets[[j]]), ab, ja,
+                                   pd$P[i, j], fdrs[k]))
+      }
+      writeLines(lines, file)
+    })
+
+  # ---- Statistics: multi-set p-values ----
+  multiset_data <- reactive({
+    sets <- get_sets(); req(length(sets) >= 2)
+    u <- get_universe()
+    inc <- compute_inclusive_intersections(sets)
+    inc <- inc[vapply(inc, function(x) x$n_sets >= 2, logical(1))]
+    rows <- lapply(inc, function(x) {
+      sizes <- vapply(x$sets_included, function(nm) length(sets[[nm]]), integer(1))
+      exp_k <- multiset_expected(sizes, u$size)
+      p <- multiset_pvalue(sizes, x$count, u$size)
+      list(intersection = paste(x$sets_included, collapse = " ∩ "),
+           degree = x$n_sets,
+           observed = x$count,
+           expected = exp_k,
+           fold = if (exp_k > 0) x$count / exp_k else NA_real_,
+           p = p)
+    })
+    df <- do.call(rbind, lapply(rows, function(r) data.frame(
+      Intersection = r$intersection, Degree = r$degree,
+      Observed = r$observed, Expected = round(r$expected, 2),
+      Fold = round(r$fold, 2), P = r$p, stringsAsFactors = FALSE)))
+    df$FDR <- bh_adjust(df$P)
+    df <- df[order(df$P), ]
+    df
+  })
+
+  output$multiset_universe_note <- renderUI({
+    u <- get_universe()
+    div(class = "stat-pill", paste("universe size:", u$size))
+  })
+
+  output$multiset_tbl <- renderTable({
+    df <- multiset_data()
+    df$P   <- format.pval(df$P, digits = 3, eps = 1e-300)
+    df$FDR <- format.pval(df$FDR, digits = 3, eps = 1e-300)
+    df
+  }, striped = TRUE, hover = TRUE, width = "100%")
+
+  output$dl_multiset <- downloadHandler(
+    filename = function() "multiset_pvalues.tsv",
+    content = function(file) {
+      df <- multiset_data()
+      write.table(df, file, sep = "\t", quote = FALSE,
+                   row.names = FALSE, na = "")
+    })
+
+  # ---- Similarity matrices ----
+  sim_render <- function(metric) {
+    sets <- get_sets(); req(length(sets) >= 2)
+    M <- pairwise_similarity(sets, metric)
+    df <- as.data.frame(round(M, 3))
+    df <- cbind(`Set` = rownames(df), df)
+    df
+  }
+  output$sim_jaccard <- renderTable(sim_render("jaccard"),
+                                       hover = TRUE, striped = TRUE, width = "100%")
+  output$sim_overlap <- renderTable(sim_render("overlap"),
+                                       hover = TRUE, striped = TRUE, width = "100%")
+  output$sim_dice    <- renderTable(sim_render("dice"),
+                                       hover = TRUE, striped = TRUE, width = "100%")
+
+  sim_dl <- function(metric, file) {
+    sets <- get_sets(); req(length(sets) >= 2)
+    M <- pairwise_similarity(sets, metric)
+    df <- cbind(Set = rownames(M), as.data.frame(M))
+    write.table(df, file, sep = "\t", quote = FALSE, row.names = FALSE)
+  }
+  output$dl_jaccard <- downloadHandler(filename = function() "jaccard.tsv",
+                                          content = function(f) sim_dl("jaccard", f))
+  output$dl_overlap <- downloadHandler(filename = function() "overlap.tsv",
+                                          content = function(f) sim_dl("overlap", f))
+  output$dl_dice    <- downloadHandler(filename = function() "dice.tsv",
+                                          content = function(f) sim_dl("dice", f))
+
+  # ---- Reproducibility ----
+  output$repro_code <- renderText({
+    sets <- get_sets()
+    if (!length(sets)) return("Add at least one set in the Data tab.")
+    u <- get_universe()
+    generate_repro_code(sets, u$size, input$plot_type, input$heatmap_metric %||% "jaccard")
+  })
+
+  output$methods_text <- renderText({
+    sets <- get_sets()
+    if (!length(sets)) return("")
+    u <- get_universe()
+    generate_methods_text(sets, u$size,
+      source = if (!is.null(input$upload$name))
+                 paste0("uploaded file '", input$upload$name, "'")
+               else "manual entry")
+  })
+
+  output$dl_code <- downloadHandler(
+    filename = function() "venncompare_analysis.R",
+    content = function(file) {
+      sets <- get_sets(); u <- get_universe()
+      writeLines(generate_repro_code(sets, u$size, input$plot_type,
+                                       input$heatmap_metric %||% "jaccard"),
+                 file)
+    })
+
+  observeEvent(input$copy_code, {
+    sets <- get_sets(); u <- get_universe()
+    txt <- generate_repro_code(sets, u$size, input$plot_type,
+                                input$heatmap_metric %||% "jaccard")
+    session$sendCustomMessage("copy_code", txt)
+    showNotification("R code copied to clipboard.", type = "message")
+  })
 }
+
+# JSON helpers — jsonlite is in the standard WebR distribution
+jsonlite_toJSON   <- function(x) as.character(jsonlite::toJSON(x, auto_unbox = TRUE, pretty = TRUE, null = "null"))
+jsonlite_fromJSON <- function(t) jsonlite::fromJSON(t, simplifyVector = FALSE)
 
 shinyApp(ui, server)
 ```
+
+:::
