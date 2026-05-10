@@ -2,7 +2,7 @@ name: Build and Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -35,8 +35,7 @@ jobs:
 
       - name: Setup Quarto
         uses: quarto-dev/quarto-actions/setup@v2
-        with:
-          version: "2.0.0"
+        
       - name: Install R render dependencies
         run: |
           Rscript -e 'install.packages(c("knitr", "rmarkdown", "shiny", "bslib", "jsonlite", "shinylive"), repos = "https://cloud.r-project.org")'
