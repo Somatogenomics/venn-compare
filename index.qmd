@@ -1499,7 +1499,7 @@ server <- function(input, output, session) {
         A = nm[i], B = nm[j],
         `|A|` = length(sets[[i]]),
         `|B|` = length(sets[[j]]),
-        `|A\u2229B|` = ab,
+        A_intersect_B = ab,
         Jaccard = round(ja, 3),
         P   = format.pval(pd$P[i, j], digits = 3, eps = 1e-300),
         FDR = format.pval(fdrs[k],     digits = 3, eps = 1e-300),
