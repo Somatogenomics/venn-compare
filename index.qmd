@@ -1,11 +1,14 @@
 ---
 title: "VennCompare"
 subtitle: "Set comparison, statistics, and visualization — fully in your browser"
+engine: knitr
 format:
   html:
-    page-layout: full
+    page-layout: custom
     embed-resources: false
     theme: cosmo
+    resources:
+      - shinylive-sw.js
 filters:
   - shinylive
 ---
