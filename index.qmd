@@ -760,9 +760,7 @@ custom_css <- HTML(sprintf("
 
 ui <- page_navbar(
   title = "VennCompare",
-  theme = bs_theme(bootswatch = "cosmo", primary = ACCENT,
-                    base_font = font_google("Manrope"),
-                    heading_font = font_google("Fraunces")),
+  theme = bs_theme(bootswatch = "cosmo", primary = ACCENT),
   header = tags$head(tags$style(custom_css)),
   bg = INK, inverse = TRUE,
 
