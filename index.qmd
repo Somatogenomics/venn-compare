@@ -1,19 +1,14 @@
 ---
 title: "VennCompare"
 subtitle: "Set comparison, statistics, and visualization — fully in your browser"
-engine: knitr
 format:
   html:
-    page-layout: custom
+    page-layout: full
     embed-resources: false
     theme: cosmo
-    resources:
-      - shinylive-sw.js
 filters:
   - shinylive
 ---
-
-::: {.app-frame}
 
 ```{shinylive-r}
 #| standalone: true
@@ -1645,5 +1640,3 @@ jsonlite_fromJSON <- function(t) jsonlite::fromJSON(t, simplifyVector = FALSE)
 
 shinyApp(ui, server)
 ```
-
-:::
