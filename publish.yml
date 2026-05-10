@@ -53,19 +53,16 @@ jobs:
         with:
           path: ./_site
       - name: Inspect rendered site
+        if: always()
         run: |
+          set +e
           echo "Files in _site:"
           find _site -maxdepth 3 -type f | sort | head -100
-
-          echo "Search for shinylive in rendered HTML:"
-          grep -n "shinylive" _site/index.html | head -30 || true
-
-          echo "Search for app code in rendered HTML:"
-          grep -n "VennCompare v2" _site/index.html | head -10 || true
-          grep -n "shinyApp" _site/index.html | head -10 || true
-
           echo "Size of rendered HTML:"
-          ls -lh _site/index.html
+          ls -lh _site/index.html || true
+          echo "shinylive markers in HTML:"
+          grep -c "shinylive" _site/index.html || true
+          exit 0
   deploy:
     environment:
       name: github-pages
