@@ -34,7 +34,7 @@ v1 was a clean Venn-and-bar viewer for up to 7 sets. v2 turns it into a full set
 
 ### The killer features
 
-1. **Statistical significance.** Every pairwise overlap gets a one-sided Fisher's exact p-value. Every multi-way intersection gets an exact hypergeometric p-value (Wang, Zhao & Sherman, *Sci Rep* 2015). All adjusted with Benjamini–Hochberg. You finally know whether your overlap is "real" or just expected by chance — something Venny / InteractiVenn / jvenn cannot tell you.
+1. **Statistical significance.** Every pairwise overlap gets a one-sided Fisher's exact p-value. Every multi-way intersection gets an exact hypergeometric p-value (Wang, Zhao & Zhang, *Sci Rep* 2015). All adjusted with Benjamini–Hochberg. You finally know whether your overlap is "real" or just expected by chance — something Venny / InteractiVenn / jvenn cannot tell you.
 
 2. **Background universe.** Specify the size of your sample frame (e.g. ~20,000 expressed genes for a transcriptomics study). v2 warns you when you're using the union as the universe (rarely what you want).
 
@@ -99,7 +99,7 @@ All p-values use exact tests (no asymptotic approximations).
 - **Pairwise overlap:** one-sided Fisher's exact test on the 2 × 2 contingency table `(both, A only, B only, neither)`. The "neither" cell uses the user-specified universe size.
 - **Multi-way intersection:** exact hypergeometric formula
   $$P(|A_1 \cap \dots \cap A_k| \geq x) = \sum_{j=x}^{\min |A_i|} \binom{N}{j} \prod_{i=1}^{k} \frac{\binom{N-j}{|A_i|-j}}{\binom{N}{|A_i|}}$$
-  computed in log-space with the log-sum-exp trick. (Wang, Zhao & Sherman, *Sci Rep* 2015; doi:10.1038/srep16923.)
+  computed in log-space with the log-sum-exp trick. (Wang, Zhao & Zhang, *Sci Rep* 2015; doi:10.1038/srep16923.)
 - **Multiple testing:** Benjamini–Hochberg FDR across the relevant family (all pairwise tests, or all degree-≥2 multi-way tests).
 - **Expected intersection size:** $\mathbb{E}[|A_1 \cap \dots \cap A_k|] = N \cdot \prod (|A_i| / N)$.
 - **Fold enrichment:** observed / expected.
@@ -114,7 +114,7 @@ Assumptions surfaced in the *About* tab. The "Methods text" generated under *Rep
 
 If you used the multi-set p-values, please also cite:
 
-> Wang M, Zhao Y, Sherman BT. Efficient test and visualization of multi-set intersections. *Scientific Reports* 2015; 5: 16923. doi:[10.1038/srep16923](https://doi.org/10.1038/srep16923)
+> Wang M, Zhao Y, Zhang B. Efficient test and visualization of multi-set intersections. *Scientific Reports* 2015; 5: 16923. doi:[10.1038/srep16923](https://doi.org/10.1038/srep16923)
 
 If you used UpSet plots:
 

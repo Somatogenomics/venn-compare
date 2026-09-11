@@ -1,6 +1,8 @@
 ---
 title: "VennCompare"
+pagetitle: "Venn diagram and UpSet plot tool with overlap statistics"
 subtitle: "Set comparison, statistics, and visualization — fully in your browser"
+description: "Free browser-based Venn diagram and UpSet plot tool for comparing 2-7 gene lists or any sets, with Fisher's exact and hypergeometric overlap p-values, BH-FDR, set algebra and reproducible R code. No data leaves the browser."
 engine: knitr
 format:
   html:
@@ -208,7 +210,7 @@ pairwise_fisher <- function(sets, universe_size) {
   P
 }
 
-# SuperExactTest-style p-value (Wang, Zhao, Sherman 2015)
+# SuperExactTest-style p-value (Wang, Zhao, Zhang 2015)
 # P(|∩ Ai| ≥ k) given set sizes s_i drawn independently from universe N.
 # log P(X = x) = lchoose(N, x) + Σ [lchoose(N - x, s_i - x) - lchoose(N, s_i)]
 # Sum exp(log P(X=x)) for x in [k, min(s_i)] with log-sum-exp trick.
@@ -613,7 +615,7 @@ generate_repro_code <- function(sets, universe_size, plot_type, metric) {
     "fisher_p <- pairwise_fisher(sets, universe_size)",
     "",
     "# 5. Multi-set intersection p-value (SuperExactTest formula;",
-    "#    Wang, Zhao, Sherman. Sci Rep 2015. doi:10.1038/srep16923)",
+    "#    Wang, Zhao, Zhang. Sci Rep 2015. doi:10.1038/srep16923)",
     "multiset_pvalue <- function(set_sizes, k, N) {",
     "  s <- as.numeric(set_sizes)",
     "  if (any(s > N) || k > min(s) || k < 0) return(NA)",
@@ -636,7 +638,7 @@ generate_repro_code <- function(sets, universe_size, plot_type, metric) {
     "#   UpSetR::upset(UpSetR::fromList(sets), nsets = length(sets), order.by = 'freq')",
     "",
     sprintf("# Citation: VennCompare v%s (2026). https://somatogenomics.github.io/venn-compare/", VC_VERSION),
-    "# Underlying statistics: Wang M, Zhao Y, Sherman BT. Sci Rep 2015;5:16923."
+    "# Underlying statistics: Wang M, Zhao Y, Zhang B. Sci Rep 2015;5:16923."
   )
   paste(code, collapse = "\n")
 }
@@ -654,7 +656,7 @@ generate_methods_text <- function(sets, universe_size, source = "manual entry") 
     "Mutually exclusive region counts were enumerated for all 2^n − 1 ",
     "intersections. Pairwise overlap enrichment was assessed with one-sided ",
     "Fisher's exact tests; multi-set intersection significance was computed ",
-    "with the hypergeometric formulation of Wang, Zhao & Sherman ",
+    "with the hypergeometric formulation of Wang, Zhao & Zhang ",
     "(Sci Rep 2015;5:16923). P-values were adjusted across families with ",
     "the Benjamini–Hochberg procedure. Source: ", source, "."
   )
@@ -922,7 +924,7 @@ ui <- page_navbar(
       nav_panel("Multi-set p-values",
         h6("SuperExactTest-style hypergeometric p-values"),
         p(class = "small-muted",
-          HTML("For every multi-way intersection, the probability of observing this many shared elements (or more) by chance, given the set sizes and universe. Method: Wang, Zhao &amp; Sherman, <i>Sci. Rep.</i> 2015. Adjustments via Benjamini–Hochberg.")),
+          HTML("For every multi-way intersection, the probability of observing this many shared elements (or more) by chance, given the set sizes and universe. Method: Wang, Zhao &amp; Zhang, <i>Sci. Rep.</i> 2015. Adjustments via Benjamini–Hochberg.")),
         uiOutput("multiset_universe_note"),
         downloadButton("dl_multiset", "Download (TSV)",
                        class = "btn-sm btn-outline-secondary"),
@@ -956,7 +958,7 @@ ui <- page_navbar(
            verbatimTextOutput("methods_text"),
            hr(),
            h6("Suggested citations"),
-           HTML("<p><b>This tool:</b> Kobiowu S. <i>VennCompare</i> v2 (2026). <a href='https://somatogenomics.github.io/venn-compare/' target='_blank'>somatogenomics.github.io/venn-compare</a></p><p><b>Multi-set hypergeometric p-values:</b> Wang M, Zhao Y, Sherman BT. <i>Scientific Reports</i> 2015;5:16923. <a href='https://doi.org/10.1038/srep16923' target='_blank'>doi:10.1038/srep16923</a></p><p><b>UpSet visualization:</b> Lex A et al. <i>IEEE TVCG</i> 2014;20(12):1983–1992. <a href='https://doi.org/10.1109/TVCG.2014.2346248' target='_blank'>doi:10.1109/TVCG.2014.2346248</a></p>"))
+           HTML("<p><b>This tool:</b> Kobiowu S. <i>VennCompare</i> v2 (2026). <a href='https://somatogenomics.github.io/venn-compare/' target='_blank'>somatogenomics.github.io/venn-compare</a></p><p><b>Multi-set hypergeometric p-values:</b> Wang M, Zhao Y, Zhang B. <i>Scientific Reports</i> 2015;5:16923. <a href='https://doi.org/10.1038/srep16923' target='_blank'>doi:10.1038/srep16923</a></p><p><b>UpSet visualization:</b> Lex A et al. <i>IEEE TVCG</i> 2014;20(12):1983–1992. <a href='https://doi.org/10.1109/TVCG.2014.2346248' target='_blank'>doi:10.1109/TVCG.2014.2346248</a></p>"))
     )
   ),
 
@@ -1641,3 +1643,25 @@ jsonlite_fromJSON <- function(t) jsonlite::fromJSON(t, simplifyVector = FALSE)
 
 shinyApp(ui, server)
 ```
+
+## About VennCompare
+
+VennCompare compares 2 to 7 lists of identifiers — gene lists from differential expression, variant sets, sample IDs, survey responses — and tests whether their overlaps are larger than expected by chance. It runs entirely in your web browser through WebR and Shinylive: nothing is uploaded to a server.
+
+### What it does
+
+- **Venn diagrams** for 2–5 sets (ellipses for 5), **UpSet plots** for any number of sets, an intersection bar chart, and a pairwise similarity heatmap (Jaccard or overlap coefficient).
+- **Overlap statistics:** one-sided Fisher's exact test for every pair of sets and an exact hypergeometric test for every multi-set intersection (Wang, Zhao & Zhang 2015), with Benjamini–Hochberg FDR across all tests.
+- **Background universe:** set the size of the population the lists were drawn from (for example, the number of expressed genes). Using the union of the lists as the universe inflates significance; the app warns when you do.
+- **Set algebra:** type expressions such as `(A & B) - C` to extract exactly the elements you need.
+- **Input:** paste lists, or upload CSV/TSV in wide or long format, or GMT/GMX gene-set files.
+- **Output:** PNG, SVG and PDF figures; intersection tables; element search; a methods paragraph; R code that reproduces the analysis without VennCompare; session save and load as JSON.
+
+### Assumptions
+
+- Elements are treated as exchangeable draws from the stated universe. If the lists were built with different detection thresholds, use as the universe only the elements that could have appeared in every list.
+- Identifiers are matched as exact strings. Convert IDs to a common namespace before comparing.
+
+### Source and citation
+
+Source code, issues and version history: [github.com/Somatogenomics/venn-compare](https://github.com/Somatogenomics/venn-compare). Written by Abdulhadi Kobiowu ([somatogenomics.github.io](https://somatogenomics.github.io/)). For the multi-set test, also cite Wang M, Zhao Y, Zhang B (2015) Efficient test and visualization of multi-set intersections. *Scientific Reports* 5:16923.
